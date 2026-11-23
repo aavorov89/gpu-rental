@@ -523,6 +523,47 @@ func TestDatabaseRejectsHoldChanges(t *testing.T) {
 	assertAccount(t, customer, 940, 0)
 }
 
+func TestDatabaseRejectsSettlementChanges(t *testing.T) {
+	s := ledger.New(testDB)
+	customer := seedCustomer(t, 1000)
+	settled := seedReservation(t, customer)
+	open := seedReservation(t, customer)
+
+	mustHold(t, s, customer, settled, 100)
+	mustHold(t, s, customer, open, 200)
+
+	if _, err := s.Settle(context.Background(), settled, 60); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	tests := map[string]string{
+		"update": `UPDATE settlements SET used_amount = 10 WHERE reservation_id = $1`,
+		"delete": `DELETE FROM settlements WHERE reservation_id = $1`,
+	}
+
+	for name, query := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := testDB.Exec(context.Background(), query, settled)
+
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.ConstraintName != "settlements_immutable" {
+				t.Fatalf("err = %v, want violation of settlements_immutable", err)
+			}
+		})
+	}
+
+	// A retry of the original call still finds the same settlement and charges nothing.
+	settlement, err := s.Settle(context.Background(), settled, 60)
+	if err != nil {
+		t.Fatalf("retry settle: %v", err)
+	}
+	if settlement.UsedAmount != 60 {
+		t.Fatalf("used amount = %d, want 60", settlement.UsedAmount)
+	}
+
+	assertAccount(t, customer, 940, 200)
+}
+
 func TestHoldPinsReservationOwner(t *testing.T) {
 	s := ledger.New(testDB)
 	customer := seedCustomer(t, 1000)

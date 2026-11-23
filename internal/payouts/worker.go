@@ -46,18 +46,26 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 
 	providerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 
-	status, providerErr := s.provider.LookupTransfer(providerCtx, payout.IdempotencyKey)
+	transfer, providerErr := s.provider.LookupTransfer(providerCtx, payout.IdempotencyKey)
 
 	if errors.Is(providerErr, ErrTransferNotFound) {
 
 		providerErr = s.provider.CreateTransfer(providerCtx, payout.IdempotencyKey, payout.HostID, payout.Amount)
 
 		if providerErr == nil || errors.Is(providerErr, ErrTransferRejected) {
-			status, providerErr = s.provider.LookupTransfer(providerCtx, payout.IdempotencyKey)
+			transfer, providerErr = s.provider.LookupTransfer(providerCtx, payout.IdempotencyKey)
 		}
 	}
 
 	cancel()
+
+	// A transfer for another host or amount says nothing about this payout.
+	if providerErr == nil && (transfer.HostID != payout.HostID || transfer.Amount != payout.Amount) {
+		providerErr = fmt.Errorf("%w: provider has host %d amount %d, payout has host %d amount %d",
+			ErrTransferMismatch, transfer.HostID, transfer.Amount, payout.HostID, payout.Amount)
+	}
+
+	status := transfer.Status
 
 	if providerErr != nil {
 		status = StatusPending

@@ -28,7 +28,8 @@ user needs permission to create databases.
 TEST_DATABASE_URL='postgres://user:pass@localhost:5432/postgres?sslmode=disable' go test -race -count=1 ./...
 ```
 
-The test pool uses 20 connections unless the URL sets `pool_max_conns`.
+The test pool uses 20 connections unless the URL sets `pool_max_conns`. Use at
+least 2, because the two-worker test keeps two transactions open at once.
 
 To apply the same migrations to the local development database, run
 
@@ -54,11 +55,13 @@ The test database setup is in `internal/testdb`.
 | Hold is idempotent by reservation | `TestHoldIsIdempotent`, `TestConcurrentHoldsOnSameReservationHoldOnce` |
 | A held reservation cannot change owner | `TestHoldPinsReservationOwner` |
 | A hold cannot be edited or deleted | `TestDatabaseRejectsHoldChanges` |
+| A settlement cannot be edited or deleted | `TestDatabaseRejectsSettlementChanges` |
 | Settle is idempotent, another amount is an error | `TestSettleIsIdempotent`, `TestSettleRejectsConflictingAmount` |
 | Settled never exceeds held | `TestSettleRejectsMoreThanHeld`, `TestDatabaseEnforcesSettledWithinHold` |
 | Concurrent payout retries all get the same payout | `TestConcurrentRequestPayoutIsIdempotent` |
 | An unclear provider answer leaves the payout pending | `TestAmbiguousResponseLeavesPayoutPending`, `TestWorkerKeepsPendingWhileTransferInProgress`, `TestWorkerKeepsPendingOnUnknownProviderStatus` |
 | The worker resolves by lookup with the same key | `TestWorkerResolvesByLookupWithoutNewTransfer`, `TestWorkerRetriesLostTransferWithSameKey` |
+| The worker refuses a transfer for another host or amount | `TestWorkerRefusesTransferWithOtherParameters`, `TestRequestPayoutKeyConflictIsNotConfirmedByLookup` |
 | Two workers cannot process one payout | `TestSecondWorkerSkipsLockedPayout`, `TestManyWorkersNeverDoublePay` |
 
 ## Design notes
@@ -102,8 +105,10 @@ and a `CHECK` keeps `used_amount <= held_amount`. Even a bug in the Go code
 cannot settle more than was held.
 
 Each reservation can have one hold and one settlement. The settlement row tells
-us the hold is closed. The tests also check that `users.held` equals the sum
-of all open holds for the customer.
+us the hold is closed and answers retries, so a trigger rejects every `UPDATE`
+and `DELETE` on `settlements` too. Without it, deleting the row would let a
+retry charge the customer again. The tests also check that `users.held` equals
+the sum of all open holds for the customer.
 
 ### Host payouts
 
@@ -134,7 +139,10 @@ the provider can recognise a transfer it already made.
 3. If the provider reports that the transfer is missing, call `CreateTransfer`
    with the same key, host and amount. After success or a definite rejection,
    ask for the status again.
-4. Change `pending` to `paid` or `failed` only when the lookup returns that
+4. Compare the host and amount from the lookup with the payout. A difference
+   means the key belongs to another transfer, so its status says nothing about
+   this payout and the worker treats it as an error.
+5. Change `pending` to `paid` or `failed` only when the lookup returns that
    status. These two states are final. For an error, unknown status or a
    transfer still in progress, keep `pending` and try again in 5 seconds.
 
@@ -147,12 +155,16 @@ starts with a lookup, even if the previous worker already sent the transfer.
   payout could get paid twice if the key expires and a lookup says the transfer
   is missing. A lookup can also miss a recent payment if the provider is slow
   to update its records. I would check the provider's time limit and send old
-  payouts for manual review.
+  payouts for manual review. The key has no environment prefix. If two databases
+  share a provider account and issue the same payout ID, host and amount, the
+  worker cannot tell their transfers apart, so each environment needs its own
+  account.
 - **Retries and timeouts.** The delays are fixed in code. During an outage the
   worker keeps trying every 5 seconds, with no backoff, jitter, attempt limit
   or circuit breaker. Up to three provider calls share one 3-second timeout.
-  If the provider rejects a transfer but never shows it in lookup, that payout
-  can stay pending forever. Someone needs a way to review it.
+  If the provider rejects a transfer but never shows it in lookup, or the key
+  belongs to another transfer, that payout can stay pending forever. Someone
+  needs a way to review it.
 - **Connections and locks.** A slow provider keeps a Postgres connection and
   transaction busy. Enough slow calls can fill the pool and delay vacuum. A
   worker could claim the row for a limited time and release the connection
@@ -179,7 +191,11 @@ starts with a lookup, even if the previous worker already sent the transfer.
   error. The transaction rolls back, so no money moves, but those holds and
   settlements fail until the update ends. Without downtime I would add the
   column as nullable, have the database fill it for old writers, deploy the new
-  code, backfill, and only then add the constraints.
+  code, backfill, and only then add the constraints. The `holds.customer_id`
+  backfill also trusts the current reservation owner. The old schema allowed
+  that owner to change after a hold, so before upgrading a real database I would
+  compare open holds with `users.held` and resolve any difference from the
+  operation history.
 - **Failure tests.** The tests use real Postgres and the in-memory provider.
   A provider sandbox test and a test that kills the process or the database
   connection during commit would cover failures the mock cannot show.

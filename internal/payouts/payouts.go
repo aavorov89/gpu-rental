@@ -28,17 +28,25 @@ type Payout struct {
 	CreatedAt      time.Time
 }
 
+// Transfer is what the provider has on record for an idempotency key.
+type Transfer struct {
+	HostID int64
+	Amount int64
+	Status Status
+}
+
 var (
 	ErrInvalidRequest   = errors.New("invalid request")
 	ErrHostNotFound     = errors.New("host not found")
 	ErrPayoutConflict   = errors.New("payout already exists with other parameters")
 	ErrTransferNotFound = errors.New("transfer not found at provider")
 	ErrTransferRejected = errors.New("transfer rejected by provider")
+	ErrTransferMismatch = errors.New("transfer at provider has another host or amount")
 )
 
 type Provider interface {
 	CreateTransfer(ctx context.Context, key string, hostID int64, amount int64) error
-	LookupTransfer(ctx context.Context, key string) (Status, error)
+	LookupTransfer(ctx context.Context, key string) (Transfer, error)
 }
 
 type Service struct {

@@ -40,14 +40,21 @@ func setup(t *testing.T) (*payouts.Service, *payoutstest.Provider, int64) {
 		t.Fatalf("truncate payouts: %v", err)
 	}
 
+	hostID := seedHost(t)
+	provider := payoutstest.New()
+
+	return payouts.New(testDB, provider), provider, hostID
+}
+
+func seedHost(t *testing.T) int64 {
+	t.Helper()
+
 	var hostID int64
 	if err := testDB.QueryRow(context.Background(), `INSERT INTO users (balance) VALUES (0) RETURNING id`).Scan(&hostID); err != nil {
 		t.Fatalf("seed host: %v", err)
 	}
 
-	provider := payoutstest.New()
-
-	return payouts.New(testDB, provider), provider, hostID
+	return hostID
 }
 
 func keyFor(id string) string {
@@ -551,6 +558,83 @@ func TestWorkerKeepsPendingOnUnknownProviderStatus(t *testing.T) {
 		t.Fatalf("processed = %v, err = %v", processed, err)
 	}
 	assertStatus(t, "p-unknown", payouts.StatusPending)
+}
+
+func TestWorkerRefusesTransferWithOtherParameters(t *testing.T) {
+	tests := []struct {
+		name      string
+		otherHost bool
+		amount    int64
+		outcome   payoutstest.Outcome
+	}{
+		{name: "paid to another host", otherHost: true, amount: 100, outcome: payoutstest.Success},
+		{name: "paid another amount", amount: 250, outcome: payoutstest.Success},
+		{name: "failed for another host", otherHost: true, amount: 100, outcome: payoutstest.HardFailure},
+		{name: "in progress for another host", otherHost: true, amount: 100, outcome: payoutstest.InProgress},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, p, host := setup(t)
+
+			transferHost := host
+			if tt.otherHost {
+				transferHost = seedHost(t)
+			}
+
+			// The key already belongs to another transfer. The app stopped before
+			// its first call, so the worker never sees a key conflict from the provider.
+			p.QueueCreate(tt.outcome)
+			err := p.CreateTransfer(context.Background(), keyFor("p-foreign"), transferHost, tt.amount)
+			if err != nil && !errors.Is(err, payouts.ErrTransferRejected) {
+				t.Fatalf("seed transfer: %v", err)
+			}
+			insertDuePayout(t, "p-foreign", host, 100)
+
+			processed, err := s.ProcessOne(context.Background())
+			if !processed || !errors.Is(err, payouts.ErrTransferMismatch) {
+				t.Fatalf("processed = %v, err = %v, want ErrTransferMismatch", processed, err)
+			}
+
+			assertStatus(t, "p-foreign", payouts.StatusPending)
+			if calls := p.CreateCalls(); len(calls) != 1 {
+				t.Fatalf("worker created another transfer: %+v", calls)
+			}
+
+			// The payout waits for its next attempt.
+			processed, err = s.ProcessOne(context.Background())
+			if processed || err != nil {
+				t.Fatalf("second pass: processed = %v, err = %v", processed, err)
+			}
+		})
+	}
+}
+
+func TestRequestPayoutKeyConflictIsNotConfirmedByLookup(t *testing.T) {
+	s, p, host := setup(t)
+	otherHost := seedHost(t)
+
+	if err := p.CreateTransfer(context.Background(), keyFor("p-reused"), otherHost, 500); err != nil {
+		t.Fatalf("seed transfer: %v", err)
+	}
+
+	_, err := s.RequestPayout(context.Background(), "p-reused", host, 100)
+	if !errors.Is(err, payoutstest.ErrKeyReused) {
+		t.Fatalf("err = %v, want ErrKeyReused", err)
+	}
+	assertStatus(t, "p-reused", payouts.StatusPending)
+
+	makeDue(t)
+
+	processed, err := s.ProcessOne(context.Background())
+	if !processed || !errors.Is(err, payouts.ErrTransferMismatch) {
+		t.Fatalf("processed = %v, err = %v, want ErrTransferMismatch", processed, err)
+	}
+
+	assertStatus(t, "p-reused", payouts.StatusPending)
+	if n := p.Applied(keyFor("p-reused")); n != 1 {
+		t.Fatalf("applied = %d, want only the original transfer", n)
+	}
 }
 
 func TestWorkerIgnoresEmptyQueueAndFinishedPayouts(t *testing.T) {

@@ -201,8 +201,8 @@ func (p *Provider) CreateTransfer(ctx context.Context, key string, hostID int64,
 	return nil
 }
 
-// LookupTransfer reads the saved status for this key. A missing key gives ErrTransferNotFound.
-func (p *Provider) LookupTransfer(ctx context.Context, key string) (payouts.Status, error) {
+// LookupTransfer reads the saved transfer for this key. A missing key gives ErrTransferNotFound.
+func (p *Provider) LookupTransfer(ctx context.Context, key string) (payouts.Transfer, error) {
 	p.mu.Lock()
 	p.lookupCalls = append(p.lookupCalls, key)
 	p.activeLookups[key]++
@@ -228,7 +228,7 @@ func (p *Provider) LookupTransfer(ctx context.Context, key string) (payouts.Stat
 
 	if g != nil {
 		if err := g.wait(ctx); err != nil {
-			return "", err
+			return payouts.Transfer{}, err
 		}
 	}
 
@@ -236,12 +236,12 @@ func (p *Provider) LookupTransfer(ctx context.Context, key string) (payouts.Stat
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return "", fmt.Errorf("%w: %v", ErrAmbiguous, ctx.Err())
+			return payouts.Transfer{}, fmt.Errorf("%w: %v", ErrAmbiguous, ctx.Err())
 		}
 	}
 
 	if lookupErr != nil {
-		return "", lookupErr
+		return payouts.Transfer{}, lookupErr
 	}
 
 	p.mu.Lock()
@@ -249,10 +249,10 @@ func (p *Provider) LookupTransfer(ctx context.Context, key string) (payouts.Stat
 
 	t, ok := p.transfers[key]
 	if !ok {
-		return "", payouts.ErrTransferNotFound
+		return payouts.Transfer{}, payouts.ErrTransferNotFound
 	}
 
-	return t.status, nil
+	return payouts.Transfer{HostID: t.hostID, Amount: t.amount, Status: t.status}, nil
 }
 
 // SetStatus changes a saved transfer, as if the provider finished it later.
