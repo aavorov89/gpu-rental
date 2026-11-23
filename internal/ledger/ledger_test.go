@@ -612,11 +612,14 @@ func TestSettleWithoutHold(t *testing.T) {
 	customer := seedCustomer(t, 1000)
 	reservation := seedReservation(t, customer)
 
-	for _, id := range []int64{reservation, 999_999_999} {
-		_, err := s.Settle(context.Background(), id, 1)
-		if !errors.Is(err, ledger.ErrReservationNotFound) {
-			t.Fatalf("reservation %d: err = %v, want ErrReservationNotFound", id, err)
-		}
+	_, err := s.Settle(context.Background(), reservation, 1)
+	if !errors.Is(err, ledger.ErrHoldNotFound) {
+		t.Fatalf("reservation without hold: err = %v, want ErrHoldNotFound", err)
+	}
+
+	_, err = s.Settle(context.Background(), 999_999_999, 1)
+	if !errors.Is(err, ledger.ErrReservationNotFound) {
+		t.Fatalf("unknown reservation: err = %v, want ErrReservationNotFound", err)
 	}
 
 	assertAccount(t, customer, 1000, 0)

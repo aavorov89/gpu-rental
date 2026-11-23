@@ -145,6 +145,19 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 		WHERE reservation_id = $1`, reservationID).Scan(&customerID, &heldAmount)
 
 	if errors.Is(err, pgx.ErrNoRows) {
+		var reservationExists bool
+
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM reservations WHERE id = $1)`, reservationID).Scan(&reservationExists)
+
+		if err != nil {
+			return Settlement{}, err
+		}
+
+		if reservationExists {
+			return Settlement{}, ErrHoldNotFound
+		}
+
 		return Settlement{}, ErrReservationNotFound
 	}
 

@@ -62,6 +62,7 @@ The test database setup is in `internal/testdb`.
 | An unclear provider answer leaves the payout pending | `TestAmbiguousResponseLeavesPayoutPending`, `TestWorkerKeepsPendingWhileTransferInProgress`, `TestWorkerKeepsPendingOnUnknownProviderStatus` |
 | The worker resolves by lookup with the same key | `TestWorkerResolvesByLookupWithoutNewTransfer`, `TestWorkerRetriesLostTransferWithSameKey` |
 | The worker refuses a transfer for another host or amount | `TestWorkerRefusesTransferWithOtherParameters`, `TestRequestPayoutKeyConflictIsNotConfirmedByLookup` |
+| The database enforces the payout state machine | `TestDatabaseEnforcesPayoutStateMachine` |
 | Two workers cannot process one payout | `TestSecondWorkerSkipsLockedPayout`, `TestManyWorkersNeverDoublePay` |
 
 ## Design notes
@@ -122,7 +123,8 @@ both timeout cases.
 `payout:<payout_id>` there and uses it for the first `CreateTransfer` call.
 If the process stops just after commit, the worker still has the row and the
 key. A second request with the same ID, host and amount returns the saved
-payout. Changing the host or amount for that ID gives a conflict.
+payout. Changing the host or amount for that ID gives a conflict. A `nil` error
+does not mean the money moved. Only the `paid` status says that.
 
 The first worker check is due 30 seconds from the start of the insert
 transaction. The first provider call has a 3-second timeout. Usually it
@@ -149,53 +151,38 @@ the provider can recognise a transfer it already made.
 If the worker stops before commit, Postgres releases its lock. The next worker
 starts with a lookup, even if the previous worker already sent the transfer.
 
+A trigger enforces the state machine in the database. Only a `pending` row can
+change, and only its status and retry time, because a changed key would make
+the worker send a second real transfer. Payouts cannot be deleted.
+
 ## What would break in production
 
-- **Provider keys.** A provider may remember a key for a limited time. An old
-  payout could get paid twice if the key expires and a lookup says the transfer
-  is missing. A lookup can also miss a recent payment if the provider is slow
-  to update its records. I would check the provider's time limit and send old
-  payouts for manual review. The key has no environment prefix. If two databases
-  share a provider account and issue the same payout ID, host and amount, the
-  worker cannot tell their transfers apart, so each environment needs its own
-  account.
-- **Retries and timeouts.** The delays are fixed in code. During an outage the
-  worker keeps trying every 5 seconds, with no backoff, jitter, attempt limit
-  or circuit breaker. Up to three provider calls share one 3-second timeout.
-  If the provider rejects a transfer but never shows it in lookup, or the key
-  belongs to another transfer, that payout can stay pending forever. Someone
-  needs a way to review it.
-- **Connections and locks.** A slow provider keeps a Postgres connection and
-  transaction busy. Enough slow calls can fill the pool and delay vacuum. A
-  worker could claim the row for a limited time and release the connection
-  before calling the provider. Today each worker handles one row per tick.
-  Operations on one busy customer also wait for the same row lock.
-- **Reconciliation.** I would compare payouts with provider statements and
-  check open holds against `users.held` regularly. Today only the tests check
-  the holds. There are no webhooks or later checks for reversals of paid
-  transfers. With asynchronous replication, a Postgres failover can also lose
-  a payout row after the provider has moved the money.
-- **Observability.** The worker logs errors. For a live service I would record
-  queue size, age of the oldest pending payout and provider error rate, and
-  alert on stuck payouts. Status history, structured logs and traces would
-  help explain what happened to one payment.
-- **Accounting and access.** Settlement charges the customer. Paying a host
-  still needs a record of what the host earned and how much they can withdraw.
-  Other missing parts are top-ups, refunds, a double-entry journal, other
-  currencies, authentication, access checks, rate limits and an audit trail.
-  An abandoned hold stays open until someone settles it. Settling for zero
-  releases the money and records a settlement. There is no separate cancel.
-- **Schema rollout.** The migrations that add `settlements.held_amount` and
-  `holds.customer_id` make those columns required at once. During a rolling
-  update, instances on the previous version fail their inserts with a `NOT NULL`
-  error. The transaction rolls back, so no money moves, but those holds and
-  settlements fail until the update ends. Without downtime I would add the
-  column as nullable, have the database fill it for old writers, deploy the new
-  code, backfill, and only then add the constraints. The `holds.customer_id`
-  backfill also trusts the current reservation owner. The old schema allowed
-  that owner to change after a hold, so before upgrading a real database I would
-  compare open holds with `users.held` and resolve any difference from the
-  operation history.
-- **Failure tests.** The tests use real Postgres and the in-memory provider.
-  A provider sandbox test and a test that kills the process or the database
-  connection during commit would cover failures the mock cannot show.
+- **Provider keys.** If the provider forgets an old key, a lookup says the
+  transfer is missing and the worker can pay again. Older payouts need manual
+  review. Keys have no environment prefix, so each environment needs its own
+  provider account.
+- **Retries and timeouts.** Delays are fixed, with no backoff, jitter, attempt
+  limit or circuit breaker. Up to three provider calls share one 3-second
+  timeout. A key mismatch, or a rejection that lookup never shows, keeps a
+  payout `pending` forever, with no review queue.
+- **Connections and locks.** A claim holds a Postgres transaction during
+  provider calls, so a slow provider can fill the pool and delay vacuum. Each
+  worker handles one row per tick.
+- **Reconciliation.** At runtime nothing compares payouts with provider
+  statements or open holds with `users.held`. Later reversals go unnoticed. A
+  payout stores no provider transfer ID or confirmation time. An asynchronous
+  failover can lose a payout after the money moved.
+- **Observability.** Errors go to a plain-text log. There are no metrics,
+  alerts, status history or traces.
+- **Accounting and access.** `RequestPayout` trusts the caller's host and amount
+  because host earnings are not modeled. There is no authentication, rate limit,
+  top-up, refund, double-entry journal or second currency. `payout_id` has no
+  format or length limit. An abandoned hold stays open until someone settles it
+  for zero.
+- **Deployment.** Two migrations add required columns at once, so old instances
+  fail their writes during a rolling update. The `holds.customer_id` backfill
+  trusts the current reservation owner, so a real upgrade must first compare
+  open holds with `users.held`. Compose is for local tests only, with a
+  superuser, a default password and an unpinned image.
+- **Failure tests.** The provider is a mock, and no test kills the process or
+  the database connection during commit.

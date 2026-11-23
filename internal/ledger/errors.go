@@ -7,6 +7,7 @@ var (
 	ErrCustomerNotFound         = errors.New("customer not found")
 	ErrReservationNotFound      = errors.New("reservation not found")
 	ErrReservationOwnerMismatch = errors.New("reservation belongs to another customer")
+	ErrHoldNotFound             = errors.New("hold not found")
 	ErrHoldConflict             = errors.New("hold already exists with another amount")
 	ErrSettlementConflict       = errors.New("settlement already exists with another amount")
 	ErrInsufficientFunds        = errors.New("insufficient funds")

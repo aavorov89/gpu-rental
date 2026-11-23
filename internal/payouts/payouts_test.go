@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gpu-rental/internal/payouts"
@@ -287,6 +288,26 @@ func TestRequestPayoutRejectsConflictingParameters(t *testing.T) {
 		t.Fatalf("other host: err = %v, want ErrPayoutConflict", err)
 	}
 	if calls := p.CreateCalls(); len(calls) != 1 {
+		t.Fatalf("create calls = %+v", calls)
+	}
+}
+
+func TestRequestPayoutRejectsKeyOfAnotherPayout(t *testing.T) {
+	s, p, host := setup(t)
+
+	_, err := testDB.Exec(context.Background(), `
+		INSERT INTO payouts (id, host_id, amount, idempotency_key)
+		VALUES ('p-imported', $1, 100, $2)
+	`, host, keyFor("p-new"))
+	if err != nil {
+		t.Fatalf("insert payout: %v", err)
+	}
+
+	_, err = s.RequestPayout(context.Background(), "p-new", host, 100)
+	if !errors.Is(err, payouts.ErrPayoutConflict) {
+		t.Fatalf("err = %v, want ErrPayoutConflict", err)
+	}
+	if calls := p.CreateCalls(); len(calls) != 0 {
 		t.Fatalf("create calls = %+v", calls)
 	}
 }
@@ -635,6 +656,55 @@ func TestRequestPayoutKeyConflictIsNotConfirmedByLookup(t *testing.T) {
 	if n := p.Applied(keyFor("p-reused")); n != 1 {
 		t.Fatalf("applied = %d, want only the original transfer", n)
 	}
+}
+
+func TestDatabaseEnforcesPayoutStateMachine(t *testing.T) {
+	s, p, host := setup(t)
+	otherHost := seedHost(t)
+
+	insertDuePayout(t, "p-paid", host, 100)
+	processOne(t, s)
+
+	p.QueueCreate(payoutstest.HardFailure)
+	insertDuePayout(t, "p-failed", host, 100)
+	processOne(t, s)
+
+	insertDuePayout(t, "p-open", host, 100)
+
+	tests := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{name: "pending key", query: `UPDATE payouts SET idempotency_key = 'payout:other' WHERE id = 'p-open'`},
+		{name: "pending host", query: `UPDATE payouts SET host_id = $1 WHERE id = 'p-open'`, args: []any{otherHost}},
+		{name: "pending amount", query: `UPDATE payouts SET amount = 250 WHERE id = 'p-open'`},
+		{name: "delete pending", query: `DELETE FROM payouts WHERE id = 'p-open'`},
+		{name: "reopen paid", query: `UPDATE payouts SET status = 'pending' WHERE id = 'p-paid'`},
+		{name: "paid to failed", query: `UPDATE payouts SET status = 'failed' WHERE id = 'p-paid'`},
+		{name: "reopen failed", query: `UPDATE payouts SET status = 'pending' WHERE id = 'p-failed'`},
+		{name: "failed to paid", query: `UPDATE payouts SET status = 'paid' WHERE id = 'p-failed'`},
+		{name: "reschedule paid", query: `UPDATE payouts SET next_attempt_at = NOW() WHERE id = 'p-paid'`},
+		{name: "delete paid", query: `DELETE FROM payouts WHERE id = 'p-paid'`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := testDB.Exec(context.Background(), tt.query, tt.args...)
+
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.ConstraintName != "payouts_state_machine" {
+				t.Fatalf("err = %v, want violation of payouts_state_machine", err)
+			}
+		})
+	}
+
+	assertStatus(t, "p-paid", payouts.StatusPaid)
+	assertStatus(t, "p-failed", payouts.StatusFailed)
+
+	// A pending payout can still reach a final state.
+	processOne(t, s)
+	assertStatus(t, "p-open", payouts.StatusPaid)
 }
 
 func TestWorkerIgnoresEmptyQueueAndFinishedPayouts(t *testing.T) {

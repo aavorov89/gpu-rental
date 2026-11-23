@@ -71,6 +71,8 @@ func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int
 
 	var payout Payout
 
+	// ON CONFLICT has no target on purpose. With (id), concurrent retries of one
+	// payout would fail on the unique idempotency key instead of doing nothing.
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO payouts (id, host_id, amount, idempotency_key, next_attempt_at)
 		VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 seconds')
@@ -88,6 +90,10 @@ func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int
 				`, payoutID).Scan(
 			&payout.ID, &payout.HostID, &payout.Amount, &payout.Status, &payout.IdempotencyKey, &payout.CreatedAt,
 		)
+
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Payout{}, fmt.Errorf("%w: idempotency key %q belongs to another payout", ErrPayoutConflict, key)
+		}
 
 		if err != nil {
 			return Payout{}, err
