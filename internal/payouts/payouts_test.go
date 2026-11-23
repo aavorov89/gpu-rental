@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// setup empties the queue, because ProcessOne claims any due payout.
+// setup clears the queue so the worker only sees payouts from this test.
 func setup(t *testing.T) (*payouts.Service, *payoutstest.Provider, int64) {
 	t.Helper()
 
@@ -54,7 +54,8 @@ func keyFor(id string) string {
 	return "payout:" + id
 }
 
-// insertDuePayout simulates a crash right after the payout row was committed.
+// insertDuePayout leaves the row a worker would find if the app stopped
+// before its first provider call. The row is ready to process now.
 func insertDuePayout(t *testing.T, id string, hostID, amount int64) {
 	t.Helper()
 
@@ -153,7 +154,7 @@ func TestRequestPayoutPersistsAndUsesDerivedKey(t *testing.T) {
 		t.Fatalf("create calls = %+v", calls)
 	}
 
-	// Only the worker may mark a payout paid.
+	// The provider accepted the call. The worker still has to check the status.
 	assertStatus(t, "p1", payouts.StatusPending)
 
 	makeDue(t)
@@ -531,7 +532,7 @@ func TestSecondWorkerSkipsLockedPayout(t *testing.T) {
 
 	waitFor(t, entered)
 
-	// The row is locked by the first worker, so this must return immediately.
+	// The first worker still holds the lock. The second should skip this row.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 

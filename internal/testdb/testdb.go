@@ -1,6 +1,4 @@
-// Package testdb gives a test binary its own migrated Postgres database.
-// The database has a random name and is dropped by the returned cleanup, so
-// tests never read or write the development tables.
+// Package testdb sets up a separate Postgres database for each test package.
 package testdb
 
 import (
@@ -24,8 +22,9 @@ const (
 	maxConns   = 20
 )
 
-// Open creates and migrates a temporary database. TEST_DATABASE_URL selects the
-// server; its role must be allowed to create databases.
+// Open creates a database with a random name and runs the migrations there.
+// The user in TEST_DATABASE_URL needs permission to create databases.
+// Call the cleanup function when the tests finish to drop the database.
 func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 	serverURL := os.Getenv("TEST_DATABASE_URL")
 	if serverURL == "" {
@@ -58,7 +57,7 @@ func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 		return nil, nil, err
 	}
 
-	// The name contains only a fixed prefix and hex, so it is safe to inline.
+	// We build the SQL name here from a fixed prefix and hex digits.
 	name := "gpu_rental_test_" + hex.EncodeToString(suffix)
 
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
@@ -107,7 +106,7 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 	dir := filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 
-	// Goose needs database/sql, so only migrations go through this adapter.
+	// Goose needs a database/sql handle for the migrations.
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
 

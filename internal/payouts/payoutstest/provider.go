@@ -1,4 +1,4 @@
-// Package payoutstest provides an in-memory payment provider for tests.
+// Package payoutstest has a mock provider that keeps transfers in memory.
 package payoutstest
 
 import (
@@ -11,30 +11,28 @@ import (
 	"gpu-rental/internal/payouts"
 )
 
-// Outcome is what the provider does with one CreateTransfer call.
+// Outcome tells the mock how to handle a transfer request.
 type Outcome int
 
 const (
-	// Success moves the money and reports success.
+	// Success pays the host and sends back a reply.
 	Success Outcome = iota
-	// HardFailure definitively rejects the transfer. No money moves.
+	// HardFailure rejects a new transfer and saves its status as failed.
 	HardFailure
-	// TimeoutNotApplied loses the request. No money moves, but the caller
-	// only sees an ambiguous error.
+	// TimeoutNotApplied drops the request before payment. The caller gets ErrAmbiguous.
 	TimeoutNotApplied
-	// TimeoutApplied moves the money and loses the response, so the caller
-	// sees the same ambiguous error.
+	// TimeoutApplied pays the host and drops the reply. The caller gets ErrAmbiguous.
 	TimeoutApplied
 )
 
 var (
-	// ErrAmbiguous says nothing about whether the transfer happened.
+	// ErrAmbiguous means the caller still has to check if the money moved.
 	ErrAmbiguous = errors.New("ambiguous provider response")
-	// ErrKeyReused means one idempotency key was sent with different parameters.
+	// ErrKeyReused means this key already belongs to another host or amount.
 	ErrKeyReused = errors.New("idempotency key reused with different parameters")
 )
 
-// CreateCall records the arguments of one CreateTransfer call.
+// CreateCall holds the key, host and amount from one request.
 type CreateCall struct {
 	Key    string
 	HostID int64
@@ -72,8 +70,7 @@ func (g *gate) wait(ctx context.Context) error {
 	}
 }
 
-// Provider implements payouts.Provider and deduplicates transfers by key,
-// as a real idempotent payment API would.
+// Provider remembers each transfer by key. A retry with the same key pays at most once.
 type Provider struct {
 	mu             sync.Mutex
 	createOutcomes []Outcome
@@ -89,7 +86,7 @@ type Provider struct {
 	lookupGate     *gate
 }
 
-// New returns a provider whose calls succeed until told otherwise.
+// New makes a mock that accepts new transfers by default.
 func New() *Provider {
 	return &Provider{
 		transfers:     make(map[string]*transfer),
@@ -98,8 +95,8 @@ func New() *Provider {
 	}
 }
 
-// QueueCreate sets the outcomes of the next CreateTransfer calls.
-// Once the queue is empty, calls succeed.
+// QueueCreate adds results for upcoming transfer requests, in order.
+// After the last result, new transfers succeed again.
 func (p *Provider) QueueCreate(outcomes ...Outcome) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -107,7 +104,7 @@ func (p *Provider) QueueCreate(outcomes ...Outcome) {
 	p.createOutcomes = append(p.createOutcomes, outcomes...)
 }
 
-// QueueLookupError makes the next LookupTransfer calls return these errors.
+// QueueLookupError adds one error per lookup. A nil entry allows a normal lookup.
 func (p *Provider) QueueLookupError(errs ...error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -115,7 +112,7 @@ func (p *Provider) QueueLookupError(errs ...error) {
 	p.lookupErrors = append(p.lookupErrors, errs...)
 }
 
-// SetLookupDelay makes every lookup take at least d.
+// SetLookupDelay adds a wait before the mock returns a lookup result.
 func (p *Provider) SetLookupDelay(d time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -123,8 +120,8 @@ func (p *Provider) SetLookupDelay(d time.Duration) {
 	p.lookupDelay = d
 }
 
-// BlockNextCreate pauses the next CreateTransfer. The channel closes when the
-// call arrives, and the function lets it continue.
+// BlockNextCreate pauses the next transfer request. Wait for the channel to
+// close, then call the returned function when the request can continue.
 func (p *Provider) BlockNextCreate() (<-chan struct{}, func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -134,7 +131,8 @@ func (p *Provider) BlockNextCreate() (<-chan struct{}, func()) {
 	return p.createGate.entered, p.createGate.open
 }
 
-// BlockNextLookup pauses the next LookupTransfer in the same way.
+// BlockNextLookup pauses one status check. The closed channel tells the test
+// the check has started. Call the returned function to let it finish.
 func (p *Provider) BlockNextLookup() (<-chan struct{}, func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -144,7 +142,8 @@ func (p *Provider) BlockNextLookup() (<-chan struct{}, func()) {
 	return p.lookupGate.entered, p.lookupGate.open
 }
 
-// CreateTransfer implements payouts.Provider.
+// CreateTransfer records each request. Repeating it with the same key,
+// host and amount can move the money only once.
 func (p *Provider) CreateTransfer(ctx context.Context, key string, hostID int64, amount int64) error {
 	p.mu.Lock()
 	p.createCalls = append(p.createCalls, CreateCall{Key: key, HostID: hostID, Amount: amount})
@@ -197,7 +196,7 @@ func (p *Provider) CreateTransfer(ctx context.Context, key string, hostID int64,
 	return nil
 }
 
-// LookupTransfer implements payouts.Provider.
+// LookupTransfer reads the saved status for this key. A missing key gives ErrTransferNotFound.
 func (p *Provider) LookupTransfer(ctx context.Context, key string) (payouts.Status, error) {
 	p.mu.Lock()
 	p.lookupCalls = append(p.lookupCalls, key)
@@ -251,7 +250,7 @@ func (p *Provider) LookupTransfer(ctx context.Context, key string) (payouts.Stat
 	return t.status, nil
 }
 
-// CreateCalls returns every CreateTransfer call in order.
+// CreateCalls lists the transfer requests in the order the mock received them.
 func (p *Provider) CreateCalls() []CreateCall {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -259,7 +258,7 @@ func (p *Provider) CreateCalls() []CreateCall {
 	return append([]CreateCall(nil), p.createCalls...)
 }
 
-// LookupCalls returns the key of every LookupTransfer call in order.
+// LookupCalls lists the keys in the order the mock received the status checks.
 func (p *Provider) LookupCalls() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -267,7 +266,7 @@ func (p *Provider) LookupCalls() []string {
 	return append([]string(nil), p.lookupCalls...)
 }
 
-// Applied returns how many times money actually moved for key.
+// Applied counts how many times the mock paid the host for this key.
 func (p *Provider) Applied(key string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -275,7 +274,7 @@ func (p *Provider) Applied(key string) int {
 	return p.applied[key]
 }
 
-// LookupOverlapped reports whether two lookups for one key ever ran at once.
+// LookupOverlapped reports if two status checks ran at the same time for the same key.
 func (p *Provider) LookupOverlapped() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

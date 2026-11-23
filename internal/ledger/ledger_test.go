@@ -82,7 +82,8 @@ func mustHold(t *testing.T, s *ledger.Service, customerID, reservationID, amount
 	return hold
 }
 
-// assertAccount checks the balance and the ledger invariants for a customer.
+// assertAccount checks the customer's balance and adds up the open holds.
+// It also checks that every settlement fits inside its hold.
 func assertAccount(t *testing.T, customerID, wantBalance, wantHeld int64) {
 	t.Helper()
 
@@ -277,8 +278,7 @@ func TestHoldIsIdempotent(t *testing.T) {
 
 	first := mustHold(t, s, customer, reservation, 100)
 
-	// The balance is fully held now, so a retry must return the hold
-	// instead of failing the funds check.
+	// The first call reserved all 100. A retry should still get the same hold.
 	second := mustHold(t, s, customer, reservation, 100)
 
 	if first.ReservationID != second.ReservationID || first.Amount != second.Amount || !first.CreatedAt.Equal(second.CreatedAt) {

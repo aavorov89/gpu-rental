@@ -1,13 +1,13 @@
-# Local secrets
+# Local environment files
 .env
 .env.*
 
-# Go build and test output
+# Files from Go builds and tests
 *.test
 *.out
 /bin/
 
-# Editors and OS
+# Editor settings and macOS files
 .idea/
 .vscode/
 .DS_Store
