@@ -1,0 +1,13 @@
+# Local secrets
+.env
+.env.*
+
+# Go build and test output
+*.test
+*.out
+/bin/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
