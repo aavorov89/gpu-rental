@@ -491,6 +491,31 @@ func TestDatabaseEnforcesSettledWithinHold(t *testing.T) {
 	assertAccount(t, customer, 940, 100)
 }
 
+func TestHoldPinsReservationOwner(t *testing.T) {
+	s := ledger.New(testDB)
+	customer := seedCustomer(t, 1000)
+	other := seedCustomer(t, 1000)
+	reservation := seedReservation(t, customer)
+	otherReservation := seedReservation(t, other)
+
+	mustHold(t, s, customer, reservation, 100)
+	mustHold(t, s, other, otherReservation, 200)
+
+	_, err := testDB.Exec(context.Background(), `UPDATE reservations SET customer_id = $1 WHERE id = $2`, other, reservation)
+
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.ConstraintName != "holds_reservation_customer_fkey" {
+		t.Fatalf("err = %v, want violation of holds_reservation_customer_fkey", err)
+	}
+
+	if _, err := s.Settle(context.Background(), reservation, 60); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	assertAccount(t, customer, 940, 0)
+	assertAccount(t, other, 1000, 200)
+}
+
 func TestSettleRejectsNegativeAmount(t *testing.T) {
 	s := ledger.New(testDB)
 	customer := seedCustomer(t, 1000)

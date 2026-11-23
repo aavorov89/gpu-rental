@@ -23,6 +23,8 @@ const (
 	TimeoutNotApplied
 	// TimeoutApplied pays the host and drops the reply. The caller gets ErrAmbiguous.
 	TimeoutApplied
+	// InProgress accepts a transfer that stays pending until SetStatus changes it.
+	InProgress
 )
 
 var (
@@ -177,9 +179,12 @@ func (p *Provider) CreateTransfer(ctx context.Context, key string, hostID int64,
 
 	if !exists {
 		t = &transfer{hostID: hostID, amount: amount, status: payouts.StatusPaid}
-		if outcome == HardFailure {
+		switch outcome {
+		case HardFailure:
 			t.status = payouts.StatusFailed
-		} else {
+		case InProgress:
+			t.status = payouts.StatusPending
+		default:
 			p.applied[key]++
 		}
 		p.transfers[key] = t
@@ -248,6 +253,22 @@ func (p *Provider) LookupTransfer(ctx context.Context, key string) (payouts.Stat
 	}
 
 	return t.status, nil
+}
+
+// SetStatus changes a saved transfer, as if the provider finished it later.
+func (p *Provider) SetStatus(key string, status payouts.Status) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	t, ok := p.transfers[key]
+	if !ok {
+		panic(fmt.Sprintf("payoutstest: SetStatus: no transfer for key %q", key))
+	}
+
+	if t.status == payouts.StatusPending && status == payouts.StatusPaid {
+		p.applied[key]++
+	}
+	t.status = status
 }
 
 // CreateCalls lists the transfer requests in the order the mock received them.

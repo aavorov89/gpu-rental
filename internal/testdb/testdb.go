@@ -6,19 +6,21 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
-	"runtime"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+
+	gpurental "gpu-rental"
 )
 
 const (
-	defaultURL = "postgres://gpu_rental:gpu_rental@127.0.0.1:5432/gpu_rental?sslmode=disable"
+	defaultURL = "postgres://gpu_rental:gpu_rental@127.0.0.1:55432/gpu_rental?sslmode=disable"
 	maxConns   = 20
 )
 
@@ -39,7 +41,8 @@ func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 	connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	admin, err := pgx.Connect(connectCtx, serverURL)
+	// The parsed config leaves out pool_* settings, which Postgres would reject.
+	admin, err := pgx.ConnectConfig(connectCtx, config.ConnConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect to Postgres (run `docker compose up -d --wait` or set TEST_DATABASE_URL): %w", err)
 	}
@@ -76,7 +79,9 @@ func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 	}
 
 	config.ConnConfig.Database = name
-	config.MaxConns = maxConns
+	if !strings.Contains(serverURL, "pool_max_conns") {
+		config.MaxConns = maxConns
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -99,18 +104,16 @@ func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 }
 
 func migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return fmt.Errorf("locate migrations directory")
-	}
-
-	dir := filepath.Join(filepath.Dir(file), "..", "..", "migrations")
-
 	// Goose needs a database/sql handle for the migrations.
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
 
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, os.DirFS(dir))
+	files, err := fs.Sub(gpurental.Migrations, "migrations")
+	if err != nil {
+		return fmt.Errorf("open migrations: %w", err)
+	}
+
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, files)
 	if err != nil {
 		return fmt.Errorf("load migrations: %w", err)
 	}

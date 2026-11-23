@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -29,6 +30,7 @@ type Payout struct {
 
 var (
 	ErrInvalidRequest   = errors.New("invalid request")
+	ErrHostNotFound     = errors.New("host not found")
 	ErrPayoutConflict   = errors.New("payout already exists with other parameters")
 	ErrTransferNotFound = errors.New("transfer not found at provider")
 	ErrTransferRejected = errors.New("transfer rejected by provider")
@@ -64,7 +66,7 @@ func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO payouts (id, host_id, amount, idempotency_key, next_attempt_at)
 		VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 seconds')
-		ON CONFLICT (id) DO NOTHING
+		ON CONFLICT DO NOTHING
 		RETURNING id, host_id, amount, status, idempotency_key, created_at
 		`, payoutID, hostID, amount, key).Scan(
 		&payout.ID, &payout.HostID, &payout.Amount, &payout.Status, &payout.IdempotencyKey, &payout.CreatedAt,
@@ -88,6 +90,11 @@ func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int
 		}
 
 		return payout, nil
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" && pgErr.ConstraintName == "payouts_host_id_fkey" {
+		return Payout{}, ErrHostNotFound
 	}
 
 	if err != nil {

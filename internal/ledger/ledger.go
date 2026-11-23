@@ -98,10 +98,10 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 	}
 
 	err = tx.QueryRow(ctx, `
-				INSERT INTO holds (reservation_id, amount)
-				VALUES ($1, $2)
+				INSERT INTO holds (reservation_id, customer_id, amount)
+				VALUES ($1, $2, $3)
 				RETURNING reservation_id, amount, created_at
-				`, reservationID, amount).Scan(&hold.ReservationID, &hold.Amount, &hold.CreatedAt)
+				`, reservationID, customerID, amount).Scan(&hold.ReservationID, &hold.Amount, &hold.CreatedAt)
 
 	if err != nil {
 		return Hold{}, err
@@ -140,10 +140,9 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 	var customerID, heldAmount int64
 
 	err = tx.QueryRow(ctx, `
-		SELECT r.customer_id, h.amount
-		FROM holds h
-		JOIN reservations r ON r.id = h.reservation_id
-		WHERE h.reservation_id = $1`, reservationID).Scan(&customerID, &heldAmount)
+		SELECT customer_id, amount
+		FROM holds
+		WHERE reservation_id = $1`, reservationID).Scan(&customerID, &heldAmount)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Settlement{}, ErrReservationNotFound

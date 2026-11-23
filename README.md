@@ -7,12 +7,16 @@ raw SQL.
 
 ## Run the tests
 
-You need Go 1.27.1 or newer and Docker with Compose. From the project directory run
+You need Go 1.26 or newer and Docker with Compose. From the project directory run
 
 ```bash
 docker compose up -d --wait
-go test -race ./...
+go test -race -count=1 ./...
 ```
+
+Compose publishes Postgres on `127.0.0.1:55432`, so it does not clash with a
+local Postgres on the default port. `-count=1` turns off the Go test cache,
+which could otherwise report a pass without touching the database.
 
 The ledger and payout tests each create a database named `gpu_rental_test_*`.
 They apply the SQL migrations there and drop the database when the tests finish.
@@ -21,23 +25,44 @@ If you already have Postgres running, set `TEST_DATABASE_URL`. The database
 user needs permission to create databases.
 
 ```bash
-TEST_DATABASE_URL='postgres://user:pass@localhost:5432/postgres?sslmode=disable' go test -race ./...
+TEST_DATABASE_URL='postgres://user:pass@localhost:5432/postgres?sslmode=disable' go test -race -count=1 ./...
 ```
+
+The test pool uses 20 connections unless the URL sets `pool_max_conns`.
 
 To apply the same migrations to the local development database, run
 
 ```bash
 GOOSE_DRIVER=postgres \
-GOOSE_DBSTRING='postgres://gpu_rental:gpu_rental@127.0.0.1:5432/gpu_rental?sslmode=disable' \
+GOOSE_DBSTRING='postgres://gpu_rental:gpu_rental@127.0.0.1:55432/gpu_rental?sslmode=disable' \
 GOOSE_MIGRATION_DIR=./migrations \
 go tool -modfile=tools.mod goose up
 ```
 
-The SQL files are in `migrations/`. I keep the Goose command in `tools.mod`
-with its own `tools.sum` because the command also needs drivers for other databases.
+The SQL files are in `migrations/`, and `embed.go` in the project root embeds
+them for the tests. I keep the Goose command in `tools.mod` with its own
+`tools.sum` because the command also needs drivers for other databases.
 The test database setup is in `internal/testdb`.
 
-## Customer balance
+### What the tests cover
+
+| Requirement | Tests |
+| --- | --- |
+| Hold and settle release the leftover | `TestHoldThenSettleReleasesLeftover` |
+| A short balance leaves no partial state | `TestHoldRejectsShortBalanceWithoutPartialState` |
+| Concurrent holds cannot overdraw | `TestConcurrentHoldsCannotOverdraw` |
+| Hold is idempotent by reservation | `TestHoldIsIdempotent`, `TestConcurrentHoldsOnSameReservationHoldOnce` |
+| A held reservation cannot change owner | `TestHoldPinsReservationOwner` |
+| Settle is idempotent, another amount is an error | `TestSettleIsIdempotent`, `TestSettleRejectsConflictingAmount` |
+| Settled never exceeds held | `TestSettleRejectsMoreThanHeld`, `TestDatabaseEnforcesSettledWithinHold` |
+| Concurrent payout retries all get the same payout | `TestConcurrentRequestPayoutIsIdempotent` |
+| An unclear provider answer leaves the payout pending | `TestAmbiguousResponseLeavesPayoutPending`, `TestWorkerKeepsPendingWhileTransferInProgress`, `TestWorkerKeepsPendingOnUnknownProviderStatus` |
+| The worker resolves by lookup with the same key | `TestWorkerResolvesByLookupWithoutNewTransfer`, `TestWorkerRetriesLostTransferWithSameKey` |
+| Two workers cannot process one payout | `TestSecondWorkerSkipsLockedPayout`, `TestManyWorkersNeverDoublePay` |
+
+## Design notes
+
+### Customer balance
 
 The code is in `internal/ledger`. All amounts are integers in minor units of
 one currency. Postgres stores them as `BIGINT`. A customer can spend
@@ -56,9 +81,10 @@ gives a conflict. For a new hold, check the available balance, insert the
 hold and increase `users.held`. If the money is short, the transaction rolls
 back and the reservation has no hold row.
 
-**Settle.** Read the customer ID and the amount from the reservation and its
-hold. The service never edits a hold after creating it. Lock the customer row,
-then read the settlement. With `READ COMMITTED`, this read sees a settlement
+**Settle.** Read the customer ID and the amount from the hold. The service
+never edits a hold after creating it, and a composite foreign key stops the
+reservation from changing owner while a hold exists, so the customer whose
+`held` grew is the one charged. Lock the customer row, then read the settlement. With `READ COMMITTED`, this read sees a settlement
 that another request committed while we waited for the lock. A retry with the
 same usage gets that settlement back. Different usage gives a conflict.
 
@@ -77,12 +103,13 @@ Each reservation can have one hold and one settlement. The settlement row tells
 us the hold is closed. The tests also check that `users.held` equals the sum
 of all open holds for the customer.
 
-## Host payouts
+### Host payouts
 
 The service and worker are in `internal/payouts`. The caller supplies the
-provider. The mock in `internal/payouts/payoutstest` can pay, reject a transfer
-or return a timeout. It can lose the request before moving money or lose the
-reply after moving money. The caller sees the same error in both timeout cases.
+provider. The mock in `internal/payouts/payoutstest` can pay, reject a transfer,
+keep it in progress or return a timeout. It can lose the request before moving
+money or lose the reply after moving money. The caller sees the same error in
+both timeout cases.
 
 `RequestPayout` first commits a `pending` row. It stores the key
 `payout:<payout_id>` there and uses it for the first `CreateTransfer` call.
@@ -144,6 +171,13 @@ starts with a lookup, even if the previous worker already sent the transfer.
   currencies, authentication, access checks, rate limits and an audit trail.
   An abandoned hold stays open until someone settles it. Settling for zero
   releases the money and records a settlement. There is no separate cancel.
+- **Schema rollout.** The migrations that add `settlements.held_amount` and
+  `holds.customer_id` make those columns required at once. During a rolling
+  update, instances on the previous version fail their inserts with a `NOT NULL`
+  error. The transaction rolls back, so no money moves, but those holds and
+  settlements fail until the update ends. Without downtime I would add the
+  column as nullable, have the database fill it for old writers, deploy the new
+  code, backfill, and only then add the constraints.
 - **Failure tests.** The tests use real Postgres and the in-memory provider.
   A provider sandbox test and a test that kills the process or the database
   connection during commit would cover failures the mock cannot show.

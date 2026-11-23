@@ -194,8 +194,9 @@ func TestRequestPayoutRejectsInvalidInput(t *testing.T) {
 func TestRequestPayoutDoesNotCallProviderWhenInsertFails(t *testing.T) {
 	s, p, _ := setup(t)
 
-	if _, err := s.RequestPayout(context.Background(), "p-no-host", 999_999_999, 100); err == nil {
-		t.Fatal("expected an error for an unknown host")
+	_, err := s.RequestPayout(context.Background(), "p-no-host", 999_999_999, 100)
+	if !errors.Is(err, payouts.ErrHostNotFound) {
+		t.Fatalf("err = %v, want ErrHostNotFound", err)
 	}
 
 	if calls := p.CreateCalls(); len(calls) != 0 {
@@ -224,6 +225,44 @@ func TestRequestPayoutIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestConcurrentRequestPayoutIsIdempotent(t *testing.T) {
+	s, p, host := setup(t)
+
+	const payoutCount, callers = 30, 16
+
+	for i := range payoutCount {
+		id := fmt.Sprintf("p-race-%d", i)
+		start := make(chan struct{})
+		errs := make([]error, callers)
+
+		var wg sync.WaitGroup
+		for c := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, errs[c] = s.RequestPayout(context.Background(), id, host, 100)
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+
+		for _, err := range errs {
+			if err != nil {
+				t.Fatalf("request %s: %v", id, err)
+			}
+		}
+		if applied := p.Applied(keyFor(id)); applied != 1 {
+			t.Fatalf("applied %s = %d, want 1", id, applied)
+		}
+	}
+
+	if calls := p.CreateCalls(); len(calls) != payoutCount {
+		t.Fatalf("create calls = %d, want %d", len(calls), payoutCount)
+	}
+}
+
 func TestRequestPayoutRejectsConflictingParameters(t *testing.T) {
 	s, p, host := setup(t)
 
@@ -233,7 +272,12 @@ func TestRequestPayoutRejectsConflictingParameters(t *testing.T) {
 
 	_, err := s.RequestPayout(context.Background(), "p-conflict", host, 200)
 	if !errors.Is(err, payouts.ErrPayoutConflict) {
-		t.Fatalf("err = %v, want ErrPayoutConflict", err)
+		t.Fatalf("other amount: err = %v, want ErrPayoutConflict", err)
+	}
+
+	_, err = s.RequestPayout(context.Background(), "p-conflict", host+1, 100)
+	if !errors.Is(err, payouts.ErrPayoutConflict) {
+		t.Fatalf("other host: err = %v, want ErrPayoutConflict", err)
 	}
 	if calls := p.CreateCalls(); len(calls) != 1 {
 		t.Fatalf("create calls = %+v", calls)
@@ -459,6 +503,54 @@ func TestRejectionInvisibleToLookupStaysPending(t *testing.T) {
 		t.Fatalf("processed = %v, err = %v", processed, err)
 	}
 	assertStatus(t, "p-invisible", payouts.StatusPending)
+}
+
+func TestWorkerKeepsPendingWhileTransferInProgress(t *testing.T) {
+	s, p, host := setup(t)
+	p.QueueCreate(payoutstest.TimeoutNotApplied, payoutstest.InProgress)
+
+	_, _ = s.RequestPayout(context.Background(), "p-progress", host, 100)
+	makeDue(t)
+
+	// The lookup misses, the retry is accepted and the next lookup says in progress.
+	processOne(t, s)
+	assertStatus(t, "p-progress", payouts.StatusPending)
+
+	makeDue(t)
+	processOne(t, s)
+	assertStatus(t, "p-progress", payouts.StatusPending)
+	if n := p.Applied(keyFor("p-progress")); n != 0 {
+		t.Fatalf("applied = %d, want 0 while in progress", n)
+	}
+
+	p.SetStatus(keyFor("p-progress"), payouts.StatusPaid)
+	makeDue(t)
+	processOne(t, s)
+
+	assertStatus(t, "p-progress", payouts.StatusPaid)
+	if calls := p.CreateCalls(); len(calls) != 2 {
+		t.Fatalf("create calls = %+v, want 2", calls)
+	}
+	if n := p.Applied(keyFor("p-progress")); n != 1 {
+		t.Fatalf("applied = %d, want 1", n)
+	}
+	assertAllKeys(t, p, keyFor("p-progress"))
+}
+
+func TestWorkerKeepsPendingOnUnknownProviderStatus(t *testing.T) {
+	s, p, host := setup(t)
+
+	if _, err := s.RequestPayout(context.Background(), "p-unknown", host, 100); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	p.SetStatus(keyFor("p-unknown"), payouts.Status("reversed"))
+	makeDue(t)
+
+	processed, err := s.ProcessOne(context.Background())
+	if !processed || err == nil {
+		t.Fatalf("processed = %v, err = %v", processed, err)
+	}
+	assertStatus(t, "p-unknown", payouts.StatusPending)
 }
 
 func TestWorkerIgnoresEmptyQueueAndFinishedPayouts(t *testing.T) {

@@ -1,6 +1,6 @@
 module gpu-rental
 
-go 1.27.1
+go 1.26.0
 
 tool github.com/pressly/goose/v3/cmd/goose
 
