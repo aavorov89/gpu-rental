@@ -2,10 +2,12 @@ package payouts
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Status string
@@ -38,11 +40,11 @@ type Provider interface {
 }
 
 type Service struct {
-	db       *sql.DB
+	db       *pgxpool.Pool
 	provider Provider
 }
 
-func New(db *sql.DB, provider Provider) *Service {
+func New(db *pgxpool.Pool, provider Provider) *Service {
 	return &Service{
 		db:       db,
 		provider: provider,
@@ -59,7 +61,7 @@ func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int
 
 	var payout Payout
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.db.QueryRow(ctx, `
 		INSERT INTO payouts (id, host_id, amount, idempotency_key, next_attempt_at)
 		VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 seconds')
 		ON CONFLICT (id) DO NOTHING
@@ -68,8 +70,8 @@ func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int
 		&payout.ID, &payout.HostID, &payout.Amount, &payout.Status, &payout.IdempotencyKey, &payout.CreatedAt,
 	)
 
-	if errors.Is(err, sql.ErrNoRows) {
-		err = s.db.QueryRowContext(ctx, `
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = s.db.QueryRow(ctx, `
 					SELECT id, host_id, amount, status, idempotency_key, created_at
 					FROM payouts
 					WHERE id = $1

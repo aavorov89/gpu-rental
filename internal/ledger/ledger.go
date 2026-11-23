@@ -2,17 +2,17 @@ package ledger
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Service struct {
-	db *sql.DB
+	db *pgxpool.Pool
 }
 
-func New(db *sql.DB) *Service {
+func New(db *pgxpool.Pool) *Service {
 	return &Service{
 		db: db,
 	}
@@ -23,26 +23,24 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 		return Hold{}, ErrInvalidAmount
 	}
 
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
-		Isolation: sql.LevelReadCommitted,
-	})
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 
 	if err != nil {
 		return Hold{}, err
 	}
 
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	var balance, held int64
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 				SELECT balance,held
 				FROM users
 				WHERE id = $1
 				FOR UPDATE
 				`, customerID).Scan(&balance, &held)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Hold{}, ErrCustomerNotFound
 	}
 
@@ -52,14 +50,14 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 
 	var ownerID int64
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 				SELECT customer_id
 				FROM reservations
 				WHERE id = $1
 				FOR UPDATE
 				`, reservationID).Scan(&ownerID)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Hold{}, ErrReservationNotFound
 	}
 
@@ -73,7 +71,7 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 
 	var hold Hold
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 				SELECT reservation_id, amount, created_at
 			    FROM holds
 				WHERE reservation_id = $1
@@ -84,14 +82,14 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 			return Hold{}, ErrHoldConflict
 		}
 
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			return Hold{}, err
 		}
 
 		return hold, nil
 	}
 
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return Hold{}, err
 	}
 
@@ -99,7 +97,7 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 		return Hold{}, ErrInsufficientFunds
 	}
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 				INSERT INTO holds (reservation_id, amount)
 				VALUES ($1, $2)
 				RETURNING reservation_id, amount, created_at
@@ -109,7 +107,7 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 		return Hold{}, err
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.Exec(ctx, `
 				UPDATE users
 				SET held = held + $1
 				WHERE id = $2
@@ -119,7 +117,7 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 		return Hold{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return Hold{}, err
 	}
 
@@ -131,25 +129,23 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 		return Settlement{}, ErrInvalidAmount
 	}
 
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
-		Isolation: sql.LevelReadCommitted,
-	})
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 
 	if err != nil {
 		return Settlement{}, err
 	}
 
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	var customerID, heldAmount int64
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT r.customer_id, h.amount
 		FROM holds h
 		JOIN reservations r ON r.id = h.reservation_id
 		WHERE h.reservation_id = $1`, reservationID).Scan(&customerID, &heldAmount)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Settlement{}, ErrReservationNotFound
 	}
 
@@ -159,7 +155,7 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 
 	var locked int
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, customerID).Scan(&locked)
 
 	if err != nil {
@@ -168,7 +164,7 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 
 	var settlement Settlement
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT reservation_id, used_amount, created_at
 		FROM settlements
 		WHERE reservation_id = $1
@@ -179,10 +175,14 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 			return Settlement{}, ErrSettlementConflict
 		}
 
+		if err := tx.Commit(ctx); err != nil {
+			return Settlement{}, err
+		}
+
 		return settlement, nil
 	}
 
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return Settlement{}, err
 	}
 
@@ -191,7 +191,7 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 
 	}
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 				INSERT INTO settlements (reservation_id, used_amount)
 				VALUES ($1, $2)
 				RETURNING reservation_id, used_amount, created_at
@@ -201,7 +201,7 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 		return Settlement{}, err
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.Exec(ctx, `
 				UPDATE users
 				SET balance = balance - $1,
 				held = held - $2
@@ -212,7 +212,7 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 		return Settlement{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return Settlement{}, err
 	}
 

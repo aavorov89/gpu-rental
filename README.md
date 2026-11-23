@@ -1,7 +1,7 @@
 # GPU rental money paths
 
-A small Go module that implements two money paths against Postgres, using pgx
-through `database/sql` and raw SQL:
+A small Go module that implements two money paths against Postgres, using
+native pgx (`pgxpool`) and raw SQL:
 
 - **Prepaid hold and settle** for customers (`internal/ledger`).
 - **Ambiguous external payouts** for hosts (`internal/payouts`).
@@ -34,8 +34,11 @@ To apply the migrations to the development database:
 GOOSE_DRIVER=postgres \
 GOOSE_DBSTRING='postgres://gpu_rental:gpu_rental@127.0.0.1:5432/gpu_rental?sslmode=disable' \
 GOOSE_MIGRATION_DIR=./migrations \
-go tool goose up
+go tool -modfile=tools.mod goose up
 ```
+
+The goose CLI is pinned in `tools.mod`, because it pulls in drivers for every
+database it supports. This keeps them out of the main `go.mod`.
 
 ## Layout
 
@@ -46,6 +49,7 @@ go tool goose up
 | `internal/payouts` | `RequestPayout`, `ProcessOne`, `RunWorker` |
 | `internal/payouts/payoutstest` | Mock provider: success, hard failure, two kinds of timeout |
 | `internal/testdb` | Temporary migrated database for tests |
+| `tools.mod`, `tools.sum` | Separate module file for the goose CLI |
 
 ## Design notes
 

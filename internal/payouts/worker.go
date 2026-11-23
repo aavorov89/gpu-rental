@@ -2,27 +2,26 @@ package payouts
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
-		Isolation: sql.LevelReadCommitted,
-	})
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 
 	if err != nil {
 		return false, err
 	}
 
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	var payout Payout
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT id, host_id, amount, status, idempotency_key, created_at
 		FROM payouts
 		WHERE status = 'pending'
@@ -37,7 +36,7 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 		&payout.CreatedAt,
 	)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 
@@ -75,14 +74,14 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 	}
 
 	if status == StatusPending {
-		_, err = tx.ExecContext(ctx, `
+		_, err = tx.Exec(ctx, `
 			UPDATE payouts
 			SET next_attempt_at = clock_timestamp() + INTERVAL '5 seconds'
 			WHERE id = $1 AND status = 'pending'
 		`, payout.ID)
 
 	} else {
-		_, err = tx.ExecContext(ctx, `
+		_, err = tx.Exec(ctx, `
 			UPDATE payouts
 			SET status = $2
 			WHERE id = $1 AND status = 'pending'
@@ -94,7 +93,7 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("update payout: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit payout: %w", err)
 	}
 

@@ -2,18 +2,19 @@ package ledger_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"gpu-rental/internal/ledger"
 	"gpu-rental/internal/testdb"
 )
 
-var testDB *sql.DB
+var testDB *pgxpool.Pool
 
 func TestMain(m *testing.M) {
 	db, cleanup, err := testdb.Open(context.Background())
@@ -22,7 +23,6 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	db.SetMaxOpenConns(20)
 	testDB = db
 
 	code := m.Run()
@@ -34,7 +34,7 @@ func seedCustomer(t *testing.T, balance int64) int64 {
 	t.Helper()
 
 	var id int64
-	err := testDB.QueryRow(`INSERT INTO users (balance) VALUES ($1) RETURNING id`, balance).Scan(&id)
+	err := testDB.QueryRow(context.Background(), `INSERT INTO users (balance) VALUES ($1) RETURNING id`, balance).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed customer: %v", err)
 	}
@@ -48,7 +48,7 @@ func seedReservation(t *testing.T, customerID int64) int64 {
 	hostID := seedCustomer(t, 0)
 
 	var id int64
-	err := testDB.QueryRow(`
+	err := testDB.QueryRow(context.Background(), `
 		INSERT INTO reservations (customer_id, host_id)
 		VALUES ($1, $2)
 		RETURNING id
@@ -87,7 +87,7 @@ func assertAccount(t *testing.T, customerID, wantBalance, wantHeld int64) {
 	t.Helper()
 
 	var balance, held, openHolds int64
-	err := testDB.QueryRow(`
+	err := testDB.QueryRow(context.Background(), `
 		SELECT u.balance, u.held, COALESCE((
 			SELECT SUM(h.amount)
 			FROM holds h
@@ -111,7 +111,7 @@ func assertAccount(t *testing.T, customerID, wantBalance, wantHeld int64) {
 	}
 
 	var overSettled int
-	err = testDB.QueryRow(`
+	err = testDB.QueryRow(context.Background(), `
 		SELECT COUNT(*)
 		FROM settlements s
 		JOIN holds h ON h.reservation_id = s.reservation_id
@@ -130,7 +130,7 @@ func countRows(t *testing.T, table string, reservationID int64) int {
 	t.Helper()
 
 	var n int
-	err := testDB.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE reservation_id = $1`, reservationID).Scan(&n)
+	err := testDB.QueryRow(context.Background(), `SELECT COUNT(*) FROM `+table+` WHERE reservation_id = $1`, reservationID).Scan(&n)
 	if err != nil {
 		t.Fatalf("count %s: %v", table, err)
 	}

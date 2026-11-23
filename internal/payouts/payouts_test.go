@@ -2,7 +2,6 @@ package payouts_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -10,12 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"gpu-rental/internal/payouts"
 	"gpu-rental/internal/payouts/payoutstest"
 	"gpu-rental/internal/testdb"
 )
 
-var testDB *sql.DB
+var testDB *pgxpool.Pool
 
 func TestMain(m *testing.M) {
 	db, cleanup, err := testdb.Open(context.Background())
@@ -24,7 +25,6 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	db.SetMaxOpenConns(20)
 	testDB = db
 
 	code := m.Run()
@@ -36,12 +36,12 @@ func TestMain(m *testing.M) {
 func setup(t *testing.T) (*payouts.Service, *payoutstest.Provider, int64) {
 	t.Helper()
 
-	if _, err := testDB.Exec(`TRUNCATE payouts`); err != nil {
+	if _, err := testDB.Exec(context.Background(), `TRUNCATE payouts`); err != nil {
 		t.Fatalf("truncate payouts: %v", err)
 	}
 
 	var hostID int64
-	if err := testDB.QueryRow(`INSERT INTO users (balance) VALUES (0) RETURNING id`).Scan(&hostID); err != nil {
+	if err := testDB.QueryRow(context.Background(), `INSERT INTO users (balance) VALUES (0) RETURNING id`).Scan(&hostID); err != nil {
 		t.Fatalf("seed host: %v", err)
 	}
 
@@ -58,7 +58,7 @@ func keyFor(id string) string {
 func insertDuePayout(t *testing.T, id string, hostID, amount int64) {
 	t.Helper()
 
-	_, err := testDB.Exec(`
+	_, err := testDB.Exec(context.Background(), `
 		INSERT INTO payouts (id, host_id, amount, idempotency_key)
 		VALUES ($1, $2, $3, $4)
 	`, id, hostID, amount, keyFor(id))
@@ -70,7 +70,7 @@ func insertDuePayout(t *testing.T, id string, hostID, amount int64) {
 func makeDue(t *testing.T) {
 	t.Helper()
 
-	_, err := testDB.Exec(`
+	_, err := testDB.Exec(context.Background(), `
 		UPDATE payouts
 		SET next_attempt_at = NOW() - INTERVAL '1 second'
 		WHERE status = 'pending'
@@ -84,7 +84,7 @@ func statusOf(t *testing.T, id string) payouts.Status {
 	t.Helper()
 
 	var status payouts.Status
-	if err := testDB.QueryRow(`SELECT status FROM payouts WHERE id = $1`, id).Scan(&status); err != nil {
+	if err := testDB.QueryRow(context.Background(), `SELECT status FROM payouts WHERE id = $1`, id).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 
@@ -363,7 +363,7 @@ func TestWorkerLookupTimeoutDoesNotCreateTransfer(t *testing.T) {
 	}
 
 	var rescheduled bool
-	err = testDB.QueryRow(`
+	err = testDB.QueryRow(context.Background(), `
 		SELECT next_attempt_at > NOW()
 		FROM payouts
 		WHERE id = 'p-lookup-timeout'
