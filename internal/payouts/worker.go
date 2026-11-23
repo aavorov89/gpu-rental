@@ -52,17 +52,14 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 
 		providerErr = s.provider.CreateTransfer(providerCtx, payout.IdempotencyKey, payout.HostID, payout.Amount)
 
-		if providerErr == nil {
+		if providerErr == nil || errors.Is(providerErr, ErrTransferRejected) {
 			status, providerErr = s.provider.LookupTransfer(providerCtx, payout.IdempotencyKey)
 		}
 	}
 
 	cancel()
 
-	if errors.Is(providerErr, ErrTransferRejected) {
-		status = StatusFailed
-		providerErr = nil
-	} else if providerErr != nil {
+	if providerErr != nil {
 		status = StatusPending
 	}
 

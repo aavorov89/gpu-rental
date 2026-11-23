@@ -411,6 +411,55 @@ func TestWorkerMarksHardFailureFailed(t *testing.T) {
 	})
 }
 
+func TestRejectedRetryIsConfirmedByLookup(t *testing.T) {
+	s, p, host := setup(t)
+	p.QueueCreate(payoutstest.TimeoutNotApplied, payoutstest.HardFailure)
+
+	_, _ = s.RequestPayout(context.Background(), "p-confirm", host, 100)
+	makeDue(t)
+	processOne(t, s)
+
+	assertStatus(t, "p-confirm", payouts.StatusFailed)
+	if n := len(p.LookupCalls()); n != 2 {
+		t.Fatalf("lookups = %d, want 2", n)
+	}
+	assertAllKeys(t, p, keyFor("p-confirm"))
+}
+
+func TestRejectedRetryWithAmbiguousLookupStaysPending(t *testing.T) {
+	s, p, host := setup(t)
+	p.QueueCreate(payoutstest.TimeoutNotApplied, payoutstest.HardFailure)
+	p.QueueLookupError(nil, payoutstest.ErrAmbiguous)
+
+	_, _ = s.RequestPayout(context.Background(), "p-amb-reject", host, 100)
+	makeDue(t)
+
+	processed, err := s.ProcessOne(context.Background())
+	if !processed || !errors.Is(err, payoutstest.ErrAmbiguous) {
+		t.Fatalf("processed = %v, err = %v", processed, err)
+	}
+	assertStatus(t, "p-amb-reject", payouts.StatusPending)
+
+	makeDue(t)
+	processOne(t, s)
+	assertStatus(t, "p-amb-reject", payouts.StatusFailed)
+}
+
+func TestRejectionInvisibleToLookupStaysPending(t *testing.T) {
+	s, p, host := setup(t)
+	p.QueueCreate(payoutstest.TimeoutNotApplied, payoutstest.HardFailure)
+	p.QueueLookupError(nil, payouts.ErrTransferNotFound)
+
+	_, _ = s.RequestPayout(context.Background(), "p-invisible", host, 100)
+	makeDue(t)
+
+	processed, err := s.ProcessOne(context.Background())
+	if !processed || !errors.Is(err, payouts.ErrTransferNotFound) {
+		t.Fatalf("processed = %v, err = %v", processed, err)
+	}
+	assertStatus(t, "p-invisible", payouts.StatusPending)
+}
+
 func TestWorkerIgnoresEmptyQueueAndFinishedPayouts(t *testing.T) {
 	s, p, host := setup(t)
 

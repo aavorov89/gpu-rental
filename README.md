@@ -99,18 +99,18 @@ that the two agree.
 ### Payout state machine
 
 ```text
-             provider says paid
+             lookup says paid
   pending ───────────────────────▶ paid
      │ ▲
      │ └── ambiguous, not found, or still processing: retry later
      │
      └───────────────────────────▶ failed
-             provider definitively rejected
+             lookup says failed
 ```
 
 `paid` and `failed` are terminal. Only the worker moves a payout out of
-`pending`, and only after a provider status lookup or a definitive rejection.
-A timeout never changes the status.
+`pending`, and only when a provider status lookup returns that status. A timeout
+or a rejected `CreateTransfer` alone never changes the status.
 
 ### Payout flow
 
@@ -118,16 +118,19 @@ A timeout never changes the status.
 so money can never move without a local record. If the process dies between the
 commit and the call, the worker picks the row up.
 
-The first worker attempt is delayed by 30 seconds, longer than the 3-second
-provider timeout, so the worker does not race the initial call.
+The first worker attempt is delayed by 30 seconds to make overlap with the
+initial provider call unlikely. This is not a guarantee: if the `INSERT` waits on
+a lock or the process stalls, both may call the provider at once. The shared
+idempotency key is what prevents a double payment in that case.
 
 `ProcessOne`:
 
 1. Claim one due payout with `FOR UPDATE SKIP LOCKED`.
 2. Look up the transfer by its idempotency key.
 3. If the provider has no such transfer, call `CreateTransfer` with the **same
-   key**, then look it up again.
-4. Store `paid` or `failed`, or keep `pending` and schedule another attempt.
+   key**. After a success or a rejection, look it up again.
+4. Store the `paid` or `failed` status returned by the last lookup. On a timeout,
+   `not found`, or any other error, keep `pending` and schedule another attempt.
 
 ### Idempotency
 
@@ -168,6 +171,9 @@ which is safe because the key does not change.
 - Retry delay is a fixed 5 seconds, with no exponential backoff, jitter,
   attempt counter, dead-letter state or circuit breaker. A provider outage
   causes constant retries, and a payout can stay `pending` forever.
+- A rejection counts only once lookup reports `failed`. A provider that rejects
+  a transfer without exposing it through lookup leaves the payout retrying
+  forever. That is safe for money, but it needs a human escalation path.
 - Timeouts and delays are hard-coded instead of configured.
 - Every attempt uses one shared 3-second deadline for up to three provider calls.
 
