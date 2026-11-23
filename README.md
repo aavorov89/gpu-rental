@@ -119,12 +119,14 @@ keep it in progress or return a timeout. It can lose the request before moving
 money or lose the reply after moving money. The caller sees the same error in
 both timeout cases.
 
-`RequestPayout` first commits a `pending` row. It stores the key
-`payout:<payout_id>` there and uses it for the first `CreateTransfer` call.
-If the process stops just after commit, the worker still has the row and the
-key. A second request with the same ID, host and amount returns the saved
-payout. Changing the host or amount for that ID gives a conflict. A `nil` error
-does not mean the money moved. Only the `paid` status says that.
+`RequestPayout` accepts an ID of up to 128 ASCII letters, digits, `_` or `-`,
+which keeps it safe in logs and short enough for a provider key. It first
+commits a `pending` row. It stores the key `payout:<payout_id>` there and uses
+it for the first `CreateTransfer` call. If the process stops just after commit,
+the worker still has the row and the key. A second request with the same ID,
+host and amount returns the saved payout. Changing the host or amount for that
+ID gives a conflict. A `nil` error does not mean the money moved. Only the
+`paid` status says that.
 
 The first worker check is due 30 seconds from the start of the insert
 transaction. The first provider call has a 3-second timeout. Usually it
@@ -153,7 +155,7 @@ starts with a lookup, even if the previous worker already sent the transfer.
 
 A trigger enforces the state machine in the database. Only a `pending` row can
 change, and only its status and retry time, because a changed key would make
-the worker send a second real transfer. Payouts cannot be deleted.
+the worker send a second real transfer. `DELETE` is rejected too.
 
 ## What would break in production
 
@@ -176,13 +178,16 @@ the worker send a second real transfer. Payouts cannot be deleted.
   alerts, status history or traces.
 - **Accounting and access.** `RequestPayout` trusts the caller's host and amount
   because host earnings are not modeled. There is no authentication, rate limit,
-  top-up, refund, double-entry journal or second currency. `payout_id` has no
-  format or length limit. An abandoned hold stays open until someone settles it
-  for zero.
+  top-up, refund, double-entry journal or second currency. An abandoned hold
+  stays open until someone settles it for zero.
 - **Deployment.** Two migrations add required columns at once, so old instances
   fail their writes during a rolling update. The `holds.customer_id` backfill
   trusts the current reservation owner, so a real upgrade must first compare
   open holds with `users.held`. Compose is for local tests only, with a
-  superuser, a default password and an unpinned image.
+  superuser, a default password, no TLS and an unpinned image.
+- **Database access.** Triggers stop accidental `UPDATE` and `DELETE`, but a
+  table owner or superuser can `TRUNCATE` or disable them. Production needs
+  separate app and migration roles. Even then the app can write to `users`, so
+  only a journal and reconciliation would catch a bad balance.
 - **Failure tests.** The provider is a mock, and no test kills the process or
   the database connection during commit.

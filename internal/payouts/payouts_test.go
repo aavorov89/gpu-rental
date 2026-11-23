@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -182,6 +183,10 @@ func TestRequestPayoutRejectsInvalidInput(t *testing.T) {
 		amount int64
 	}{
 		{id: "", host: host, amount: 1},
+		{id: strings.Repeat("a", 129), host: host, amount: 1},
+		{id: "p\nforged log line", host: host, amount: 1},
+		{id: "p\n", host: host, amount: 1},
+		{id: "p 1", host: host, amount: 1},
 		{id: "p", host: 0, amount: 1},
 		{id: "p", host: host, amount: 0},
 		{id: "p", host: host, amount: -1},
@@ -196,6 +201,20 @@ func TestRequestPayoutRejectsInvalidInput(t *testing.T) {
 
 	if calls := p.CreateCalls(); len(calls) != 0 {
 		t.Fatalf("create calls = %+v", calls)
+	}
+}
+
+func TestRequestPayoutAcceptsValidIDs(t *testing.T) {
+	s, _, host := setup(t)
+
+	for _, id := range []string{
+		strings.Repeat("a", 128),
+		"3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b",
+		"payout_42",
+	} {
+		if _, err := s.RequestPayout(context.Background(), id, host, 100); err != nil {
+			t.Fatalf("id %q: %v", id, err)
+		}
 	}
 }
 

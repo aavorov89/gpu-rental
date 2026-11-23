@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -44,6 +45,9 @@ var (
 	ErrTransferMismatch = errors.New("transfer at provider has another host or amount")
 )
 
+// payoutIDPattern keeps IDs safe in logs and short enough for a provider key.
+var payoutIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
 type Provider interface {
 	CreateTransfer(ctx context.Context, key string, hostID int64, amount int64) error
 	LookupTransfer(ctx context.Context, key string) (Transfer, error)
@@ -63,7 +67,7 @@ func New(db *pgxpool.Pool, provider Provider) *Service {
 
 func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int64, amount int64) (Payout, error) {
 
-	if payoutID == "" || hostID <= 0 || amount <= 0 {
+	if !payoutIDPattern.MatchString(payoutID) || hostID <= 0 || amount <= 0 {
 		return Payout{}, ErrInvalidRequest
 	}
 
