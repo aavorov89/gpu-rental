@@ -473,7 +473,7 @@ func TestDatabaseEnforcesSettledWithinHold(t *testing.T) {
 			name:       "changed amount of settled hold",
 			query:      `UPDATE holds SET amount = 50 WHERE reservation_id = $1`,
 			args:       []any{settled},
-			constraint: "settlements_hold_fkey",
+			constraint: "holds_immutable",
 		},
 	}
 
@@ -489,6 +489,38 @@ func TestDatabaseEnforcesSettledWithinHold(t *testing.T) {
 	}
 
 	assertAccount(t, customer, 940, 100)
+}
+
+func TestDatabaseRejectsHoldChanges(t *testing.T) {
+	s := ledger.New(testDB)
+	customer := seedCustomer(t, 1000)
+	reservation := seedReservation(t, customer)
+
+	mustHold(t, s, customer, reservation, 100)
+
+	tests := map[string]string{
+		"update": `UPDATE holds SET amount = 50 WHERE reservation_id = $1`,
+		"delete": `DELETE FROM holds WHERE reservation_id = $1`,
+	}
+
+	for name, query := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := testDB.Exec(context.Background(), query, reservation)
+
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.ConstraintName != "holds_immutable" {
+				t.Fatalf("err = %v, want violation of holds_immutable", err)
+			}
+		})
+	}
+
+	assertAccount(t, customer, 1000, 100)
+
+	if _, err := s.Settle(context.Background(), reservation, 60); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	assertAccount(t, customer, 940, 0)
 }
 
 func TestHoldPinsReservationOwner(t *testing.T) {

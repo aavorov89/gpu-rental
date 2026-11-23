@@ -53,6 +53,7 @@ The test database setup is in `internal/testdb`.
 | Concurrent holds cannot overdraw | `TestConcurrentHoldsCannotOverdraw` |
 | Hold is idempotent by reservation | `TestHoldIsIdempotent`, `TestConcurrentHoldsOnSameReservationHoldOnce` |
 | A held reservation cannot change owner | `TestHoldPinsReservationOwner` |
+| A hold cannot be edited or deleted | `TestDatabaseRejectsHoldChanges` |
 | Settle is idempotent, another amount is an error | `TestSettleIsIdempotent`, `TestSettleRejectsConflictingAmount` |
 | Settled never exceeds held | `TestSettleRejectsMoreThanHeld`, `TestDatabaseEnforcesSettledWithinHold` |
 | Concurrent payout retries all get the same payout | `TestConcurrentRequestPayoutIsIdempotent` |
@@ -81,10 +82,11 @@ gives a conflict. For a new hold, check the available balance, insert the
 hold and increase `users.held`. If the money is short, the transaction rolls
 back and the reservation has no hold row.
 
-**Settle.** Read the customer ID and the amount from the hold. The service
-never edits a hold after creating it, and a composite foreign key stops the
-reservation from changing owner while a hold exists, so the customer whose
-`held` grew is the one charged. Lock the customer row, then read the settlement. With `READ COMMITTED`, this read sees a settlement
+**Settle.** Read the customer ID and the amount from the hold. A trigger
+rejects every `UPDATE` and `DELETE` on `holds`, and a composite foreign key
+stops the reservation from changing owner while a hold exists, so the customer
+whose `held` grew is the one charged. Lock the customer row, then read the
+settlement. With `READ COMMITTED`, this read sees a settlement
 that another request committed while we waited for the lock. A retry with the
 same usage gets that settlement back. Different usage gives a conflict.
 
@@ -97,7 +99,7 @@ final balance is 880 and all 880 are available.
 The database enforces the same limit. A settlement keeps a copy of the hold
 amount in `held_amount`. A composite foreign key ties that copy to the hold,
 and a `CHECK` keeps `used_amount <= held_amount`. Even a bug in the Go code
-cannot settle more than was held or change the amount of a settled hold.
+cannot settle more than was held.
 
 Each reservation can have one hold and one settlement. The settlement row tells
 us the hold is closed. The tests also check that `users.held` equals the sum
