@@ -192,10 +192,10 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 	}
 
 	err = tx.QueryRow(ctx, `
-				INSERT INTO settlements (reservation_id, used_amount)
-				VALUES ($1, $2)
+				INSERT INTO settlements (reservation_id, held_amount, used_amount)
+				VALUES ($1, $2, $3)
 				RETURNING reservation_id, used_amount, created_at
-				`, reservationID, usedAmount).Scan(&settlement.ReservationID, &settlement.UsedAmount, &settlement.CreatedAt)
+				`, reservationID, heldAmount, usedAmount).Scan(&settlement.ReservationID, &settlement.UsedAmount, &settlement.CreatedAt)
 
 	if err != nil {
 		return Settlement{}, err

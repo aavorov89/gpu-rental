@@ -68,6 +68,11 @@ subtract the whole hold from `held`. For example, with 1000 cents on the
 account, a hold of 300 leaves 700 available. If the rental costs 120, the
 final balance is 880 and all 880 are available.
 
+The database enforces the same limit. A settlement keeps a copy of the hold
+amount in `held_amount`. A composite foreign key ties that copy to the hold,
+and a `CHECK` keeps `used_amount <= held_amount`. Even a bug in the Go code
+cannot settle more than was held or change the amount of a settled hold.
+
 Each reservation can have one hold and one settlement. The settlement row tells
 us the hold is closed. The tests also check that `users.held` equals the sum
 of all open holds for the customer.

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gpu-rental/internal/ledger"
@@ -435,6 +436,59 @@ func TestSettleRejectsMoreThanHeld(t *testing.T) {
 	if n := countRows(t, "settlements", reservation); n != 0 {
 		t.Fatalf("settlement rows = %d, want 0", n)
 	}
+}
+
+func TestDatabaseEnforcesSettledWithinHold(t *testing.T) {
+	s := ledger.New(testDB)
+	customer := seedCustomer(t, 1000)
+	open := seedReservation(t, customer)
+	settled := seedReservation(t, customer)
+
+	mustHold(t, s, customer, open, 100)
+	mustHold(t, s, customer, settled, 100)
+
+	if _, err := s.Settle(context.Background(), settled, 60); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		query      string
+		args       []any
+		constraint string
+	}{
+		{
+			name:       "used above held",
+			query:      `INSERT INTO settlements (reservation_id, held_amount, used_amount) VALUES ($1, $2, $3)`,
+			args:       []any{open, 100, 101},
+			constraint: "settlements_used_lte_held",
+		},
+		{
+			name:       "forged held amount",
+			query:      `INSERT INTO settlements (reservation_id, held_amount, used_amount) VALUES ($1, $2, $3)`,
+			args:       []any{open, 101, 101},
+			constraint: "settlements_hold_fkey",
+		},
+		{
+			name:       "changed amount of settled hold",
+			query:      `UPDATE holds SET amount = 50 WHERE reservation_id = $1`,
+			args:       []any{settled},
+			constraint: "settlements_hold_fkey",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := testDB.Exec(context.Background(), tt.query, tt.args...)
+
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.ConstraintName != tt.constraint {
+				t.Fatalf("err = %v, want violation of %s", err, tt.constraint)
+			}
+		})
+	}
+
+	assertAccount(t, customer, 940, 100)
 }
 
 func TestSettleRejectsNegativeAmount(t *testing.T) {
