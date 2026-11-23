@@ -1,6 +1,7 @@
 # Local environment files
 .env
 .env.*
+!.env.example
 
 # Files from Go builds and tests
 *.test
