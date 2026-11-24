@@ -59,7 +59,6 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 
 	cancel()
 
-	// A transfer for another host or amount says nothing about this payout.
 	if providerErr == nil && (transfer.HostID != payout.HostID || transfer.Amount != payout.Amount) {
 		providerErr = fmt.Errorf("%w: provider has host %d amount %d, payout has host %d amount %d",
 			ErrTransferMismatch, transfer.HostID, transfer.Amount, payout.HostID, payout.Amount)

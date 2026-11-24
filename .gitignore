@@ -1,14 +1,11 @@
-# Local environment files
 .env
 .env.*
 !.env.example
 
-# Files from Go builds and tests
 *.test
 *.out
 /bin/
 
-# Editor settings and macOS files
 .idea/
 .vscode/
 .DS_Store

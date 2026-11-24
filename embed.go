@@ -1,5 +1,5 @@
-// Package gpurental embeds the SQL migrations. The file lives outside
-// migrations/ because the Goose command treats every Go file there as a migration.
+// Keep the embed directive here. Goose treats every Go file in migrations/
+// as a migration.
 package gpurental
 
 import "embed"

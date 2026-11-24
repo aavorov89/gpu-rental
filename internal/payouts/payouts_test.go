@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// setup clears the queue so the worker only sees payouts from this test.
+// All tests here share one queue. A worker can claim rows left by another test.
 func setup(t *testing.T) (*payouts.Service, *payoutstest.Provider, int64) {
 	t.Helper()
 
@@ -63,8 +63,7 @@ func keyFor(id string) string {
 	return "payout:" + id
 }
 
-// insertDuePayout leaves the row a worker would find if the app stopped
-// before its first provider call. The row is ready to process now.
+// insertDuePayout simulates a crash after commit and before the first provider call.
 func insertDuePayout(t *testing.T, id string, hostID, amount int64) {
 	t.Helper()
 
@@ -163,7 +162,6 @@ func TestRequestPayoutPersistsAndUsesDerivedKey(t *testing.T) {
 		t.Fatalf("create calls = %+v", calls)
 	}
 
-	// The provider accepted the call. The worker still has to check the status.
 	assertStatus(t, "p1", payouts.StatusPending)
 
 	makeDue(t)
@@ -559,7 +557,6 @@ func TestWorkerKeepsPendingWhileTransferInProgress(t *testing.T) {
 	_, _ = s.RequestPayout(context.Background(), "p-progress", host, 100)
 	makeDue(t)
 
-	// The lookup misses, the retry is accepted and the next lookup says in progress.
 	processOne(t, s)
 	assertStatus(t, "p-progress", payouts.StatusPending)
 
@@ -622,8 +619,8 @@ func TestWorkerRefusesTransferWithOtherParameters(t *testing.T) {
 				transferHost = seedHost(t)
 			}
 
-			// The key already belongs to another transfer. The app stopped before
-			// its first call, so the worker never sees a key conflict from the provider.
+			// The app crashed before its first create call for this payout.
+			// The worker has only the lookup result to detect the reused key.
 			p.QueueCreate(tt.outcome)
 			err := p.CreateTransfer(context.Background(), keyFor("p-foreign"), transferHost, tt.amount)
 			if err != nil && !errors.Is(err, payouts.ErrTransferRejected) {
@@ -641,7 +638,6 @@ func TestWorkerRefusesTransferWithOtherParameters(t *testing.T) {
 				t.Fatalf("worker created another transfer: %+v", calls)
 			}
 
-			// The payout waits for its next attempt.
 			processed, err = s.ProcessOne(context.Background())
 			if processed || err != nil {
 				t.Fatalf("second pass: processed = %v, err = %v", processed, err)
@@ -722,7 +718,6 @@ func TestDatabaseEnforcesPayoutStateMachine(t *testing.T) {
 	assertStatus(t, "p-paid", payouts.StatusPaid)
 	assertStatus(t, "p-failed", payouts.StatusFailed)
 
-	// A pending payout can still reach a final state.
 	processOne(t, s)
 	assertStatus(t, "p-open", payouts.StatusPaid)
 }
@@ -798,8 +793,7 @@ func TestWorkerDoesNotClaimPayoutDuringFirstProviderCall(t *testing.T) {
 
 	waitFor(t, entered)
 
-	// The pending row is committed before the provider call, so a crash
-	// during the call cannot lose the payout.
+	// A separate connection must already see the row in case the app dies inside the call.
 	assertStatus(t, "p-inflight", payouts.StatusPending)
 
 	processed, err := s.ProcessOne(context.Background())
@@ -839,7 +833,6 @@ func TestSecondWorkerSkipsLockedPayout(t *testing.T) {
 
 	waitFor(t, entered)
 
-	// The first worker still holds the lock. The second should skip this row.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 

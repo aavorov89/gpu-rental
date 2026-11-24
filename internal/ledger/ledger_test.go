@@ -84,8 +84,6 @@ func mustHold(t *testing.T, s *ledger.Service, customerID, reservationID, amount
 	return hold
 }
 
-// assertAccount checks the customer's balance and adds up the open holds.
-// It also checks that every settlement fits inside its hold.
 func assertAccount(t *testing.T, customerID, wantBalance, wantHeld int64) {
 	t.Helper()
 
@@ -280,7 +278,7 @@ func TestHoldIsIdempotent(t *testing.T) {
 
 	first := mustHold(t, s, customer, reservation, 100)
 
-	// The first call reserved all 100. A retry should still get the same hold.
+	// With zero available, this retry fails if Hold checks the balance first.
 	second := mustHold(t, s, customer, reservation, 100)
 
 	if first.ReservationID != second.ReservationID || first.Amount != second.Amount || !first.CreatedAt.Equal(second.CreatedAt) {
@@ -553,7 +551,6 @@ func TestDatabaseRejectsSettlementChanges(t *testing.T) {
 		})
 	}
 
-	// A retry of the original call still finds the same settlement and charges nothing.
 	settlement, err := s.Settle(context.Background(), settled, 60)
 	if err != nil {
 		t.Fatalf("retry settle: %v", err)
@@ -637,7 +634,7 @@ func TestHoldAndSettleDoNotBlockForeignKeyChecks(t *testing.T) {
 	}
 	defer tx.Rollback(context.Background())
 
-	// An insert that references this user takes this lock for its foreign key check.
+	// Postgres takes this lock when an insert references the customer by foreign key.
 	_, err = tx.Exec(context.Background(), `SELECT 1 FROM users WHERE id = $1 FOR KEY SHARE`, customer)
 	if err != nil {
 		t.Fatalf("lock user: %v", err)

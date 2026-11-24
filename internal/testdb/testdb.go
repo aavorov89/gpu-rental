@@ -1,4 +1,3 @@
-// Package testdb sets up a separate Postgres database for each test package.
 package testdb
 
 import (
@@ -24,9 +23,8 @@ const (
 	maxConns   = 20
 )
 
-// Open creates a database with a random name and runs the migrations there.
-// The user in TEST_DATABASE_URL needs permission to create databases.
-// Call the cleanup function when the tests finish to drop the database.
+// Open needs a Postgres user with permission to create databases.
+// Call the returned cleanup after the tests to drop their database.
 func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 	serverURL := os.Getenv("TEST_DATABASE_URL")
 	if serverURL == "" {
@@ -41,7 +39,7 @@ func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 	connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	// The parsed config leaves out pool_* settings, which Postgres would reject.
+	// Postgres rejects pool_* options. pgxpool already removed them from ConnConfig.
 	admin, err := pgx.ConnectConfig(connectCtx, config.ConnConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect to Postgres (run `docker compose up -d --wait` or set TEST_DATABASE_URL): %w", err)
@@ -60,7 +58,6 @@ func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 		return nil, nil, err
 	}
 
-	// We build the SQL name here from a fixed prefix and hex digits.
 	name := "gpu_rental_test_" + hex.EncodeToString(suffix)
 
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
@@ -104,7 +101,6 @@ func Open(ctx context.Context) (*pgxpool.Pool, func(), error) {
 }
 
 func migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	// Goose needs a database/sql handle for the migrations.
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
 

@@ -29,7 +29,6 @@ type Payout struct {
 	CreatedAt      time.Time
 }
 
-// Transfer is what the provider has on record for an idempotency key.
 type Transfer struct {
 	HostID int64
 	Amount int64
@@ -45,7 +44,7 @@ var (
 	ErrTransferMismatch = errors.New("transfer at provider has another host or amount")
 )
 
-// payoutIDPattern keeps IDs safe in logs and short enough for a provider key.
+// The ID must be safe to write in logs and short enough to fit in a provider key.
 var payoutIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 type Provider interface {
@@ -75,8 +74,8 @@ func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int
 
 	var payout Payout
 
-	// ON CONFLICT has no target on purpose. With (id), concurrent retries of one
-	// payout would fail on the unique idempotency key instead of doing nothing.
+	// Leave the conflict target open. Concurrent retries can hit the unique
+	// constraint on idempotency_key as well as the one on id.
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO payouts (id, host_id, amount, idempotency_key, next_attempt_at)
 		VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 seconds')
