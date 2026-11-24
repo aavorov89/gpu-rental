@@ -58,6 +58,7 @@ The test database setup is in `internal/testdb`.
 | A settlement cannot be edited or deleted | `TestDatabaseRejectsSettlementChanges` |
 | Settle is idempotent, another amount is an error | `TestSettleIsIdempotent`, `TestSettleRejectsConflictingAmount` |
 | Settled never exceeds held | `TestSettleRejectsMoreThanHeld`, `TestDatabaseEnforcesSettledWithinHold` |
+| A payout is saved as `pending` before the first provider call | `TestWorkerDoesNotClaimPayoutDuringFirstProviderCall` |
 | Concurrent payout retries all get the same payout | `TestConcurrentRequestPayoutIsIdempotent` |
 | An unclear provider answer leaves the payout pending | `TestAmbiguousResponseLeavesPayoutPending`, `TestWorkerKeepsPendingWhileTransferInProgress`, `TestWorkerKeepsPendingOnUnknownProviderStatus` |
 | The worker resolves by lookup with the same key | `TestWorkerResolvesByLookupWithoutNewTransfer`, `TestWorkerRetriesLostTransferWithSameKey` |

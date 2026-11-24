@@ -798,6 +798,10 @@ func TestWorkerDoesNotClaimPayoutDuringFirstProviderCall(t *testing.T) {
 
 	waitFor(t, entered)
 
+	// The pending row is committed before the provider call, so a crash
+	// during the call cannot lose the payout.
+	assertStatus(t, "p-inflight", payouts.StatusPending)
+
 	processed, err := s.ProcessOne(context.Background())
 	if err != nil || processed {
 		t.Fatalf("processed = %v, err = %v", processed, err)
