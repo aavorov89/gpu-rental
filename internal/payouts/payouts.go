@@ -65,7 +65,6 @@ func New(db *pgxpool.Pool, provider Provider) *Service {
 }
 
 func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int64, amount int64) (Payout, error) {
-
 	if !payoutIDPattern.MatchString(payoutID) || hostID <= 0 || amount <= 0 {
 		return Payout{}, ErrInvalidRequest
 	}
@@ -81,16 +80,16 @@ func (s *Service) RequestPayout(ctx context.Context, payoutID string, hostID int
 		VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 seconds')
 		ON CONFLICT DO NOTHING
 		RETURNING id, host_id, amount, status, idempotency_key, created_at
-		`, payoutID, hostID, amount, key).Scan(
+	`, payoutID, hostID, amount, key).Scan(
 		&payout.ID, &payout.HostID, &payout.Amount, &payout.Status, &payout.IdempotencyKey, &payout.CreatedAt,
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = s.db.QueryRow(ctx, `
-					SELECT id, host_id, amount, status, idempotency_key, created_at
-					FROM payouts
-					WHERE id = $1
-				`, payoutID).Scan(
+			SELECT id, host_id, amount, status, idempotency_key, created_at
+			FROM payouts
+			WHERE id = $1
+		`, payoutID).Scan(
 			&payout.ID, &payout.HostID, &payout.Amount, &payout.Status, &payout.IdempotencyKey, &payout.CreatedAt,
 		)
 

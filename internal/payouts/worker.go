@@ -28,12 +28,9 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 		AND next_attempt_at <= NOW()
 		ORDER BY next_attempt_at, created_at, id
 		LIMIT 1
-		FOR UPDATE SKIP LOCKED`).Scan(&payout.ID,
-		&payout.HostID,
-		&payout.Amount,
-		&payout.Status,
-		&payout.IdempotencyKey,
-		&payout.CreatedAt,
+		FOR UPDATE SKIP LOCKED
+	`).Scan(
+		&payout.ID, &payout.HostID, &payout.Amount, &payout.Status, &payout.IdempotencyKey, &payout.CreatedAt,
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -49,7 +46,6 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 	transfer, providerErr := s.provider.LookupTransfer(providerCtx, payout.IdempotencyKey)
 
 	if errors.Is(providerErr, ErrTransferNotFound) {
-
 		providerErr = s.provider.CreateTransfer(providerCtx, payout.IdempotencyKey, payout.HostID, payout.Amount)
 
 		if providerErr == nil || errors.Is(providerErr, ErrTransferRejected) {
@@ -83,14 +79,12 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 			SET next_attempt_at = clock_timestamp() + INTERVAL '5 seconds'
 			WHERE id = $1 AND status = 'pending'
 		`, payout.ID)
-
 	} else {
 		_, err = tx.Exec(ctx, `
 			UPDATE payouts
 			SET status = $2
 			WHERE id = $1 AND status = 'pending'
 		`, payout.ID, status)
-
 	}
 
 	if err != nil {
@@ -138,7 +132,5 @@ func (s *Service) RunWorker(ctx context.Context, interval time.Duration) error {
 			return ctx.Err()
 		case <-ticker.C:
 		}
-
 	}
-
 }

@@ -34,11 +34,11 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 	var balance, held int64
 
 	err = tx.QueryRow(ctx, `
-				SELECT balance,held
-				FROM users
-				WHERE id = $1
-				FOR NO KEY UPDATE
-				`, customerID).Scan(&balance, &held)
+		SELECT balance, held
+		FROM users
+		WHERE id = $1
+		FOR NO KEY UPDATE
+	`, customerID).Scan(&balance, &held)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Hold{}, ErrCustomerNotFound
@@ -51,11 +51,11 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 	var ownerID int64
 
 	err = tx.QueryRow(ctx, `
-				SELECT customer_id
-				FROM reservations
-				WHERE id = $1
-				FOR UPDATE
-				`, reservationID).Scan(&ownerID)
+		SELECT customer_id
+		FROM reservations
+		WHERE id = $1
+		FOR UPDATE
+	`, reservationID).Scan(&ownerID)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Hold{}, ErrReservationNotFound
@@ -72,10 +72,10 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 	var hold Hold
 
 	err = tx.QueryRow(ctx, `
-				SELECT reservation_id, amount, created_at
-			    FROM holds
-				WHERE reservation_id = $1
-				`, reservationID).Scan(&hold.ReservationID, &hold.Amount, &hold.CreatedAt)
+		SELECT reservation_id, amount, created_at
+		FROM holds
+		WHERE reservation_id = $1
+	`, reservationID).Scan(&hold.ReservationID, &hold.Amount, &hold.CreatedAt)
 
 	if err == nil {
 		if hold.Amount != amount {
@@ -98,20 +98,20 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 	}
 
 	err = tx.QueryRow(ctx, `
-				INSERT INTO holds (reservation_id, customer_id, amount)
-				VALUES ($1, $2, $3)
-				RETURNING reservation_id, amount, created_at
-				`, reservationID, customerID, amount).Scan(&hold.ReservationID, &hold.Amount, &hold.CreatedAt)
+		INSERT INTO holds (reservation_id, customer_id, amount)
+		VALUES ($1, $2, $3)
+		RETURNING reservation_id, amount, created_at
+	`, reservationID, customerID, amount).Scan(&hold.ReservationID, &hold.Amount, &hold.CreatedAt)
 
 	if err != nil {
 		return Hold{}, err
 	}
 
 	_, err = tx.Exec(ctx, `
-				UPDATE users
-				SET held = held + $1
-				WHERE id = $2
-				`, amount, customerID)
+		UPDATE users
+		SET held = held + $1
+		WHERE id = $2
+	`, amount, customerID)
 
 	if err != nil {
 		return Hold{}, err
@@ -142,13 +142,15 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 	err = tx.QueryRow(ctx, `
 		SELECT customer_id, amount
 		FROM holds
-		WHERE reservation_id = $1`, reservationID).Scan(&customerID, &heldAmount)
+		WHERE reservation_id = $1
+	`, reservationID).Scan(&customerID, &heldAmount)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		var reservationExists bool
 
 		err = tx.QueryRow(ctx, `
-			SELECT EXISTS (SELECT 1 FROM reservations WHERE id = $1)`, reservationID).Scan(&reservationExists)
+			SELECT EXISTS (SELECT 1 FROM reservations WHERE id = $1)
+		`, reservationID).Scan(&reservationExists)
 
 		if err != nil {
 			return Settlement{}, err
@@ -168,7 +170,8 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 	var locked int
 
 	err = tx.QueryRow(ctx, `
-		SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, customerID).Scan(&locked)
+		SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE
+	`, customerID).Scan(&locked)
 
 	if err != nil {
 		return Settlement{}, err
@@ -180,7 +183,7 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 		SELECT reservation_id, used_amount, created_at
 		FROM settlements
 		WHERE reservation_id = $1
-				`, reservationID).Scan(&settlement.ReservationID, &settlement.UsedAmount, &settlement.CreatedAt)
+	`, reservationID).Scan(&settlement.ReservationID, &settlement.UsedAmount, &settlement.CreatedAt)
 
 	if err == nil {
 		if settlement.UsedAmount != usedAmount {
@@ -200,25 +203,24 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 
 	if usedAmount > heldAmount {
 		return Settlement{}, ErrUsedExceedsHold
-
 	}
 
 	err = tx.QueryRow(ctx, `
-				INSERT INTO settlements (reservation_id, held_amount, used_amount)
-				VALUES ($1, $2, $3)
-				RETURNING reservation_id, used_amount, created_at
-				`, reservationID, heldAmount, usedAmount).Scan(&settlement.ReservationID, &settlement.UsedAmount, &settlement.CreatedAt)
+		INSERT INTO settlements (reservation_id, held_amount, used_amount)
+		VALUES ($1, $2, $3)
+		RETURNING reservation_id, used_amount, created_at
+	`, reservationID, heldAmount, usedAmount).Scan(&settlement.ReservationID, &settlement.UsedAmount, &settlement.CreatedAt)
 
 	if err != nil {
 		return Settlement{}, err
 	}
 
 	_, err = tx.Exec(ctx, `
-				UPDATE users
-				SET balance = balance - $1,
-				held = held - $2
-				WHERE id = $3
-				`, usedAmount, heldAmount, customerID)
+		UPDATE users
+		SET balance = balance - $1,
+			held = held - $2
+		WHERE id = $3
+	`, usedAmount, heldAmount, customerID)
 
 	if err != nil {
 		return Settlement{}, err
