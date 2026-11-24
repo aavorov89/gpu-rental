@@ -37,7 +37,7 @@ func (s *Service) Hold(ctx context.Context, customerID int64, reservationID int6
 				SELECT balance,held
 				FROM users
 				WHERE id = $1
-				FOR UPDATE
+				FOR NO KEY UPDATE
 				`, customerID).Scan(&balance, &held)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -168,7 +168,7 @@ func (s *Service) Settle(ctx context.Context, reservationID int64, usedAmount in
 	var locked int
 
 	err = tx.QueryRow(ctx, `
-		SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, customerID).Scan(&locked)
+		SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, customerID).Scan(&locked)
 
 	if err != nil {
 		return Settlement{}, err

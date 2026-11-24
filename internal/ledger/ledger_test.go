@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -562,6 +563,97 @@ func TestDatabaseRejectsSettlementChanges(t *testing.T) {
 	}
 
 	assertAccount(t, customer, 940, 200)
+}
+
+func TestDatabaseRejectsInvalidAmounts(t *testing.T) {
+	s := ledger.New(testDB)
+	customer := seedCustomer(t, 1000)
+	empty := seedCustomer(t, 0)
+	held := seedReservation(t, customer)
+	unheld := seedReservation(t, customer)
+
+	mustHold(t, s, customer, held, 100)
+
+	tests := []struct {
+		name       string
+		query      string
+		args       []any
+		constraint string
+	}{
+		{
+			name:       "negative balance",
+			query:      `UPDATE users SET balance = -1 WHERE id = $1`,
+			args:       []any{empty},
+			constraint: "users_balance_check",
+		},
+		{
+			name:       "negative held",
+			query:      `UPDATE users SET held = -1 WHERE id = $1`,
+			args:       []any{empty},
+			constraint: "users_held_check",
+		},
+		{
+			name:       "held above balance",
+			query:      `UPDATE users SET held = balance + 1 WHERE id = $1`,
+			args:       []any{customer},
+			constraint: "users_check",
+		},
+		{
+			name:       "zero hold",
+			query:      `INSERT INTO holds (reservation_id, customer_id, amount) VALUES ($1, $2, 0)`,
+			args:       []any{unheld, customer},
+			constraint: "holds_amount_check",
+		},
+		{
+			name:       "negative usage",
+			query:      `INSERT INTO settlements (reservation_id, held_amount, used_amount) VALUES ($1, 100, -1)`,
+			args:       []any{held},
+			constraint: "settlements_used_amount_check",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := testDB.Exec(context.Background(), tt.query, tt.args...)
+
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.ConstraintName != tt.constraint {
+				t.Fatalf("err = %v, want violation of %s", err, tt.constraint)
+			}
+		})
+	}
+
+	assertAccount(t, customer, 1000, 100)
+}
+
+func TestHoldAndSettleDoNotBlockForeignKeyChecks(t *testing.T) {
+	s := ledger.New(testDB)
+	customer := seedCustomer(t, 1000)
+	reservation := seedReservation(t, customer)
+
+	tx, err := testDB.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+
+	// An insert that references this user takes this lock for its foreign key check.
+	_, err = tx.Exec(context.Background(), `SELECT 1 FROM users WHERE id = $1 FOR KEY SHARE`, customer)
+	if err != nil {
+		t.Fatalf("lock user: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := s.Hold(ctx, customer, reservation, 100); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	if _, err := s.Settle(ctx, reservation, 60); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	assertAccount(t, customer, 940, 0)
 }
 
 func TestHoldPinsReservationOwner(t *testing.T) {

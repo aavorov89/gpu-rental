@@ -63,7 +63,10 @@ The test database setup is in `internal/testdb`.
 | The worker resolves by lookup with the same key | `TestWorkerResolvesByLookupWithoutNewTransfer`, `TestWorkerRetriesLostTransferWithSameKey` |
 | The worker refuses a transfer for another host or amount | `TestWorkerRefusesTransferWithOtherParameters`, `TestRequestPayoutKeyConflictIsNotConfirmedByLookup` |
 | The database enforces the payout state machine | `TestDatabaseEnforcesPayoutStateMachine` |
+| The database rejects invalid amounts, balances and statuses | `TestDatabaseRejectsInvalidAmounts`, `TestDatabaseRejectsInvalidPayoutValues` |
+| Customer locks do not block foreign key checks | `TestHoldAndSettleDoNotBlockForeignKeyChecks` |
 | Two workers cannot process one payout | `TestSecondWorkerSkipsLockedPayout`, `TestManyWorkersNeverDoublePay` |
+| The worker keeps running after an error | `TestRunWorkerContinuesAfterError` |
 
 ## Design notes
 
@@ -75,12 +78,12 @@ one currency. Postgres stores them as `BIGINT`. A customer can spend
 least zero and that `held <= balance`.
 
 `Hold` and `Settle` each use one `READ COMMITTED` transaction. Both lock the
-same customer row before changing money. Two requests for one customer take
-turns even if they are for different rentals.
+same customer row with `FOR NO KEY UPDATE` before changing money. Two requests
+for one customer take turns even if they are for different rentals, while
+foreign key checks from unrelated inserts do not wait.
 
-**Hold.** First lock the customer row with `FOR UPDATE`, then lock the
-reservation and check its owner. Look for an existing hold before checking
-available money. This order matters if the first call reserved the last cent.
+**Hold.** First lock the customer row, then lock the reservation and check its
+owner. Look for an existing hold before checking available money. This order matters if the first call reserved the last cent.
 A retry with the same amount gets the original hold. A different amount
 gives a conflict. For a new hold, check the available balance, insert the
 hold and increase `users.held`. If the money is short, the transaction rolls
@@ -153,9 +156,10 @@ the provider can recognise a transfer it already made.
 If the worker stops before commit, Postgres releases its lock. The next worker
 starts with a lookup, even if the previous worker already sent the transfer.
 
-A trigger enforces the state machine in the database. Only a `pending` row can
-change, and only its status and retry time, because a changed key would make
-the worker send a second real transfer. `DELETE` is rejected too.
+A trigger enforces the state machine in the database. A new row must be
+`pending`. Only a `pending` row can change, and only its status and retry time,
+because a changed key would make the worker send a second real transfer.
+`DELETE` is rejected too.
 
 ## What would break in production
 
@@ -166,10 +170,13 @@ the worker send a second real transfer. `DELETE` is rejected too.
 - **Retries and timeouts.** Delays are fixed, with no backoff, jitter, attempt
   limit or circuit breaker. Up to three provider calls share one 3-second
   timeout. A key mismatch, or a rejection that lookup never shows, keeps a
-  payout `pending` forever, with no review queue.
+  payout `pending` forever, with no review queue. A provider client that panics
+  or ignores its context can block the queue.
 - **Connections and locks.** A claim holds a Postgres transaction during
-  provider calls, so a slow provider can fill the pool and delay vacuum. Each
-  worker handles one row per tick.
+  provider calls, so a slow provider can fill the pool and delay vacuum. A long
+  lock on one customer can do the same. If a worker loses its connection during
+  a call, another worker can take the same payout, and only the idempotency key
+  prevents a second transfer. Each worker handles one row per tick.
 - **Reconciliation.** At runtime nothing compares payouts with provider
   statements or open holds with `users.held`. Later reversals go unnoticed. A
   payout stores no provider transfer ID or confirmation time. An asynchronous
@@ -180,14 +187,11 @@ the worker send a second real transfer. `DELETE` is rejected too.
   because host earnings are not modeled. There is no authentication, rate limit,
   top-up, refund, double-entry journal or second currency. An abandoned hold
   stays open until someone settles it for zero.
-- **Deployment.** Two migrations add required columns at once, so old instances
-  fail their writes during a rolling update. The `holds.customer_id` backfill
-  trusts the current reservation owner, so a real upgrade must first compare
-  open holds with `users.held`. Compose is for local tests only, with a
-  superuser, a default password, no TLS and an unpinned image.
 - **Database access.** Triggers stop accidental `UPDATE` and `DELETE`, but a
   table owner or superuser can `TRUNCATE` or disable them. Production needs
   separate app and migration roles. Even then the app can write to `users`, so
-  only a journal and reconciliation would catch a bad balance.
+  only a journal and reconciliation would catch a bad balance. Compose is for
+  local tests only, with a superuser, a default password, no TLS and an unpinned
+  image.
 - **Failure tests.** The provider is a mock, and no test kills the process or
   the database connection during commit.

@@ -695,6 +695,7 @@ func TestDatabaseEnforcesPayoutStateMachine(t *testing.T) {
 		query string
 		args  []any
 	}{
+		{name: "insert as paid", query: `INSERT INTO payouts (id, host_id, amount, status, idempotency_key) VALUES ('p-direct', $1, 100, 'paid', 'payout:p-direct')`, args: []any{host}},
 		{name: "pending key", query: `UPDATE payouts SET idempotency_key = 'payout:other' WHERE id = 'p-open'`},
 		{name: "pending host", query: `UPDATE payouts SET host_id = $1 WHERE id = 'p-open'`, args: []any{otherHost}},
 		{name: "pending amount", query: `UPDATE payouts SET amount = 250 WHERE id = 'p-open'`},
@@ -724,6 +725,43 @@ func TestDatabaseEnforcesPayoutStateMachine(t *testing.T) {
 	// A pending payout can still reach a final state.
 	processOne(t, s)
 	assertStatus(t, "p-open", payouts.StatusPaid)
+}
+
+func TestDatabaseRejectsInvalidPayoutValues(t *testing.T) {
+	_, _, host := setup(t)
+	insertDuePayout(t, "p-values", host, 100)
+
+	tests := []struct {
+		name       string
+		query      string
+		args       []any
+		constraint string
+	}{
+		{
+			name:       "zero amount",
+			query:      `INSERT INTO payouts (id, host_id, amount, idempotency_key) VALUES ('p-zero', $1, 0, 'payout:p-zero')`,
+			args:       []any{host},
+			constraint: "payouts_amount_check",
+		},
+		{
+			name:       "unknown status",
+			query:      `UPDATE payouts SET status = 'reversed' WHERE id = 'p-values'`,
+			constraint: "payouts_status_check",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := testDB.Exec(context.Background(), tt.query, tt.args...)
+
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.ConstraintName != tt.constraint {
+				t.Fatalf("err = %v, want violation of %s", err, tt.constraint)
+			}
+		})
+	}
+
+	assertStatus(t, "p-values", payouts.StatusPending)
 }
 
 func TestWorkerIgnoresEmptyQueueAndFinishedPayouts(t *testing.T) {
@@ -873,6 +911,45 @@ func TestManyWorkersNeverDoublePay(t *testing.T) {
 		if creates[keyFor(id)] != 1 || p.Applied(keyFor(id)) != 1 {
 			t.Fatalf("%s: creates = %d, applied = %d", id, creates[keyFor(id)], p.Applied(keyFor(id)))
 		}
+	}
+}
+
+func TestRunWorkerContinuesAfterError(t *testing.T) {
+	s, p, host := setup(t)
+	insertDuePayout(t, "p-run-first", host, 100)
+	insertDuePayout(t, "p-run-second", host, 100)
+	p.QueueLookupError(payoutstest.ErrAmbiguous)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.RunWorker(ctx, 5*time.Millisecond)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for statusOf(t, "p-run-second") != payouts.StatusPaid {
+		select {
+		case err := <-done:
+			t.Fatalf("worker stopped after an error: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not reach the next payout")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not stop")
 	}
 }
 
